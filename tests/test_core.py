@@ -253,3 +253,24 @@ def test_rename_matches_prefixed_card_id(env):
     plan = build_plan(str(env["dest"]), str(env["nas"]), m, ledger)
     it = {i.card_id: i for i in plan.items}["650"]
     assert it.action == A_RENAME and it.src_dir_name == "6_650" and it.dst_dir_name == "BSN1266"
+
+
+def test_interrupted_ingest_resumes(env):
+    """途中で止まった取り込み（status=copying）が残っていても、次回は再開して完了する。"""
+    ledger = env["ledger"]
+    make_card(env["cards"], "7_100", n_files=3)
+    run_ingest(env)
+    ing = ledger.latest_ingest_for_card("100")
+    # 中断を模擬: 台帳を copying に戻し、保存先の最後のファイルを消して .part を残す
+    ledger.update_ingest(ing.id, status=L.STATUS_COPYING, staging_verified_at=None, finished_at=None)
+    d = env["dest"] / "N260710" / "7_100"
+    os.remove(d / "IMG_0002.MP4"); os.remove(d / "manifest.json")
+    (d / "IMG_0002.MP4.part").write_bytes(b"xx")
+    mgr, logs = run_ingest(env)
+    job = next(iter(mgr.jobs.values()))
+    assert job.state == S_DONE, logs
+    assert any("再開" in m for m in logs)
+    assert sorted(os.listdir(d)) == ["IMG_0000.MP4", "IMG_0001.MP4", "IMG_0002.MP4", "manifest.json"]
+    new = ledger.latest_ingest_for_card("100")
+    assert new.id != ing.id and new.status == L.STATUS_STAGED
+    assert ledger.get_ingest(ing.id).status == L.STATUS_ERROR

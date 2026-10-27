@@ -253,8 +253,22 @@ class IngestManager:
             for f in existing_manifest.get("files", []):
                 if f.get("hash"):
                     existing_hashes[f["name"]] = (int(f["size"]), f["hash"])
+        # 途中で止まった前回の取り込み（アプリ終了・停電など）は、台帳に残るハッシュで再開する
+        if prev and prev.status in (L.STATUS_COPYING, L.STATUS_ERROR) and not prev.cleared_at \
+                and os.path.normcase(prev.staging_dir) == os.path.normcase(dest_dir):
+            for f in self.ledger.files_for(prev.id):
+                if f.hash and f.staging_ok and f.name not in existing_hashes:
+                    existing_hashes[f.name] = (f.size, f.hash)
+            self.ledger.update_ingest(prev.id, status=L.STATUS_ERROR, message="中断されたため、新しい取り込みで再開")
+            self.on_log(f"[{cid}] 前回中断した取り込みを再開します（検証済み {len(existing_hashes)} ファイルは再利用）")
         if os.path.isdir(dest_dir):
-            present = {n for n in os.listdir(dest_dir) if not n.endswith(".part") and n != L.MANIFEST_NAME}
+            for n in os.listdir(dest_dir):
+                if n.endswith(".part"):
+                    try:
+                        os.remove(os.path.join(dest_dir, n))
+                    except OSError:
+                        pass
+            present = {n for n in os.listdir(dest_dir) if n != L.MANIFEST_NAME}
             clash = [f.name for f in card.files if f.name in present and f.name not in existing_hashes]
             if clash:
                 self._set(job, S_ERROR, f"保存先に同名ファイルが既にあります（{clash[0]} ほか{len(clash)}件）。上書きしません")
@@ -275,10 +289,10 @@ class IngestManager:
             if self._stop.is_set():
                 raise RuntimeError("停止されました")
             dst = os.path.join(dest_dir, f.name)
-            # 再開: 既に検証済みのファイルは飛ばす
+            # 再開: 既に検証済みのファイルは、読み戻してハッシュが一致すれば飛ばす
             if f.name in existing_hashes and os.path.isfile(dst) and os.path.getsize(dst) == f.size:
                 size_, h = existing_hashes[f.name]
-                if size_ == f.size:
+                if size_ == f.size and hash_file(dst) == h:
                     self.ledger.set_file_hash(ingest_id, f.name, h, True)
                     base_done += f.size
                     job.done_bytes = base_done

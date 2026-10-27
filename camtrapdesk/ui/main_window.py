@@ -121,5 +121,18 @@ class MainWindow(QMainWindow):
             self.tray.showMessage(title, text, QSystemTrayIcon.MessageIcon.Information, 10000)
 
     def closeEvent(self, e) -> None:  # noqa: N802
+        from PySide6.QtWidgets import QMessageBox
+        from ..core import ingest as I
+        active = [j for j in self.ctx.ingest.jobs.values() if j.state in (I.S_QUEUED, I.S_COPYING, I.S_VERIFYING)]
+        if active or self.ctx.nas.current:
+            parts = []
+            if active:
+                parts.append(f"カードのコピーが {len(active)} 枚進行中")
+            if self.ctx.nas.current:
+                parts.append(f"NASへの転送中（{self.ctx.nas.current}）")
+            msg = "、".join(parts) + "です。\n終了すると途中のファイルは次回起動時にやり直します。終了しますか？"
+            if QMessageBox.question(self, "終了の確認", msg) != QMessageBox.StandardButton.Yes:
+                e.ignore()
+                return
         self.ctx.stop_background()
         super().closeEvent(e)
