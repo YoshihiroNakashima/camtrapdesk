@@ -36,7 +36,7 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
         {"season": 260710, "station": 735, "inst": 560, "ret": 295},
     ])
     make_card(cards, "318", n_files=2)
-    make_card(cards, "295", n_files=1)
+    make_card(cards, "295", n_files=2)
 
     from camtrapdesk.config import Settings
     s = Settings(dest_root=str(dest), nas_root=str(nas), season_folder="N260710", scan_roots=[str(cards)],

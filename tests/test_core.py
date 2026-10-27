@@ -69,15 +69,24 @@ def test_detect_and_ingest(env):
     assert states2 == {"264": S_SKIPPED, "110": S_SKIPPED}
 
 
-def test_ingest_rejects_bad_card(env):
+def test_ingest_small_file_is_only_a_warning(env):
     cards = env["cards"]
     root, _ = make_card(cards, "300", n_files=2)
-    # 異常サイズのファイル
     with open(os.path.join(root, "DCIM", "100_BTCF", "BAD.MP4"), "wb") as f:
         f.write(b"x" * 10)
     mgr, logs = run_ingest(env)
     job = next(iter(mgr.jobs.values()))
-    assert job.state == S_ERROR and "異常サイズ" in job.message
+    assert job.state == S_DONE
+    assert any("小さいファイル" in w for w in job.card.warnings)
+
+
+def test_ingest_rejects_single_video_card(env):
+    """動画が1枚しかないカードはカメラ不調の疑いとしてエラーにし、コピーしない。"""
+    make_card(env["cards"], "301", n_files=1)
+    mgr, logs = run_ingest(env)
+    job = next(iter(mgr.jobs.values()))
+    assert job.state == S_ERROR and "1枚" in job.message
+    assert not os.path.exists(env["dest"] / "N260710" / "301")
 
 
 def test_nas_sync_and_clear(env):
@@ -114,7 +123,7 @@ def test_nas_sync_and_clear(env):
 
 def test_clear_requires_nas(env):
     cards = env["cards"]
-    make_card(cards, "264", n_files=1)
+    make_card(cards, "264", n_files=2)
     run_ingest(env)
     s, ledger = env["settings"], env["ledger"]
     vols = list_volumes(scan_roots=[str(cards)])
@@ -165,9 +174,9 @@ def test_fieldnote_mapping_and_rename(env):
 
     # フォルダを用意: 318, 295 は取り込み済み。777 は別Type。
     cards = env["cards"]
-    make_card(cards, "318", n_files=1)
-    make_card(cards, "295", n_files=1)
-    make_card(cards, "319", n_files=1)
+    make_card(cards, "318", n_files=2)
+    make_card(cards, "295", n_files=2)
+    make_card(cards, "319", n_files=2)
     run_ingest(env)
     (env["dest"] / "N260710" / "UNKNOWN").mkdir()
     plan = build_plan(str(env["dest"]), str(env["nas"]), m, ledger)
@@ -241,7 +250,7 @@ def test_fieldnote_tolerant_headers(tmp_path):
 def test_rename_matches_prefixed_card_id(env):
     """id.txt が "6_650" で野帳の RetrievalSD が 650 でも対応づく。"""
     s, ledger = env["settings"], env["ledger"]
-    make_card(env["cards"], "6_650", n_files=1)
+    make_card(env["cards"], "6_650", n_files=2)
     run_ingest(env)
     syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
     while ledger.pending_nas():
@@ -279,7 +288,7 @@ def test_interrupted_ingest_resumes(env):
 def test_assign_id_to_card_without_idtxt(env):
     """id.txt の無いカードは一覧（others）に出て、ID を付けると取り込める。"""
     s, ledger = env["settings"], env["ledger"]
-    root, _ = make_card(env["cards"], "999", n_files=1)
+    root, _ = make_card(env["cards"], "999", n_files=2)
     os.remove(os.path.join(root, "id.txt"))
     logs = []
     mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append)

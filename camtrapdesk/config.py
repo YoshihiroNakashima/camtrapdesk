@@ -53,7 +53,8 @@ class Settings:
     media_subdirs: list[str] = field(default_factory=lambda: ["DCIM/100_BTCF"])
     media_recursive: bool = False
     media_extensions: list[str] = field(default_factory=lambda: ["mp4", "mov", "avi", "jpg", "jpeg", "thm"])
-    min_file_size_bytes: int = 1024
+    min_file_size_bytes: int = 1024          # これより小さいファイルは注意として表示する（コピーは行う）
+    min_file_count: int = 2                  # 動画がこの枚数未満ならカメラ不調とみなしてエラー（コピーしない）
     id_file_name: str = "id.txt"
     # --- 取り込みの挙動 ---
     concurrency: int = 4

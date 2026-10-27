@@ -45,11 +45,15 @@ class SettingsPage(QWidget):
         self.min_size = QSpinBox()
         self.min_size.setRange(0, 1_000_000_000)
         self.min_size.setValue(s.min_file_size_bytes)
+        self.min_count = QSpinBox()
+        self.min_count.setRange(0, 1000)
+        self.min_count.setValue(s.min_file_count)
         self.id_file = QLineEdit(s.id_file_name)
         f2.addRow("対象フォルダ（カンマ区切り）", self.media_subdirs)
         f2.addRow("", self.media_recursive)
         f2.addRow("対象の拡張子", self.media_ext)
-        f2.addRow("異常とみなす最小サイズ（バイト）", self.min_size)
+        f2.addRow("動画がこの枚数未満ならエラーにしてコピーしない（例: 2 → 1枚だけのカードは不調扱い）", self.min_count)
+        f2.addRow("注意表示の閾値: このサイズ未満のファイルがあれば表示（バイト。コピーは行う）", self.min_size)
         f2.addRow("IDファイル名", self.id_file)
         lay.addWidget(g2)
 
@@ -148,6 +152,7 @@ class SettingsPage(QWidget):
         s.media_recursive = self.media_recursive.isChecked()
         s.media_extensions = [e.lstrip(".").lower() for e in self._split(self.media_ext.text())] or ["mp4"]
         s.min_file_size_bytes = int(self.min_size.value())
+        s.min_file_count = int(self.min_count.value())
         s.id_file_name = self.id_file.text().strip() or "id.txt"
         s.concurrency = int(self.concurrency.value())
         s.verify_readback = self.verify.isChecked()

@@ -165,7 +165,8 @@ class IngestManager:
                 exclude.append(p)
         vols = list_volumes(s.scan_roots, exclude)
         cards = detect_cards(vols, s.id_file_name, s.media_subdirs, s.media_extensions,
-                             s.media_recursive, s.min_file_size_bytes, list_files=True)
+                             s.media_recursive, s.min_file_size_bytes, list_files=True,
+                             min_file_count=s.min_file_count)
         present = {c.volume.key for c in cards}
         # カードとして扱えなかったリムーバブルボリュームは、理由付きで一覧に出し、ログにも1回だけ書く
         others: dict[str, tuple[Volume, str]] = {}
@@ -204,6 +205,8 @@ class IngestManager:
                 if c.problems:
                     job.state = S_ERROR
                     job.message = "; ".join(c.problems)
+                elif c.warnings:
+                    job.message = "注意: " + "; ".join(c.warnings)
                 self.jobs[c.volume.key] = job
                 new_jobs.append(job)
         for job in new_jobs:

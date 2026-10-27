@@ -87,6 +87,7 @@ class Card:
     card_id_norm: str             # 照合用
     files: list[MediaFile] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)   # 取り込みを止めるべき問題
+    warnings: list[str] = field(default_factory=list)   # 取り込みは行うが表示する注意
 
     @property
     def total_bytes(self) -> int:
@@ -98,11 +99,13 @@ class Card:
 
 
 def list_media_files(volume: Volume, media_subdirs: list[str], extensions: list[str],
-                     recursive: bool, min_size: int) -> tuple[list[MediaFile], list[str]]:
-    """設定に従って対象ファイルを列挙する。戻り値は (ファイル一覧, 問題点)。"""
+                     recursive: bool, min_size: int) -> tuple[list[MediaFile], list[str], list[str]]:
+    """設定に従って対象ファイルを列挙する。戻り値は (ファイル一覧, 問題点, 注意)。"""
     exts = {e.lower().lstrip(".") for e in extensions}
     files: list[MediaFile] = []
     problems: list[str] = []
+    warnings: list[str] = []
+    small = 0
     found_dir = False
     for sub in media_subdirs:
         base = volume.join(*[p for p in re.split(r"[\\/]+", sub) if p])
@@ -134,7 +137,7 @@ def list_media_files(volume: Volume, media_subdirs: list[str], extensions: list[
                 if not os.path.isfile(p):
                     continue
                 if st.st_size < min_size:
-                    problems.append(f"異常サイズ(<{min_size}B): {n}")
+                    small += 1
                 files.append(MediaFile(src_path=p, rel_dir=rel_dir, name=n, size=st.st_size, mtime=st.st_mtime))
     if not found_dir:
         problems.append("対象フォルダが見つかりません: " + ", ".join(media_subdirs))
@@ -144,13 +147,17 @@ def list_media_files(volume: Volume, media_subdirs: list[str], extensions: list[
         if f.name in seen and seen[f.name] != f.rel_dir:
             problems.append(f"同名ファイルが複数フォルダにあります: {f.name}")
         seen[f.name] = f.rel_dir
-    return files, problems
+    if small:
+        warnings.append(f"{min_size}B未満の小さいファイルが{small}件")
+    return files, problems, warnings
 
 
 def detect_cards(volumes: list[Volume], id_file_name: str, media_subdirs: list[str],
                  extensions: list[str], recursive: bool, min_size: int,
-                 list_files: bool = True) -> list[Card]:
-    """id.txt を持つボリュームをカードとして返す。"""
+                 list_files: bool = True, min_file_count: int = 0) -> list[Card]:
+    """id.txt を持つボリュームをカードとして返す。
+
+    min_file_count: 対象ファイルがこの枚数未満（ただし1枚以上）のカードは、カメラ不調の疑いとして問題扱いにする。"""
     cards: list[Card] = []
     for v in volumes:
         if v.kind == "unreadable":
@@ -160,7 +167,9 @@ def detect_cards(volumes: list[Volume], id_file_name: str, media_subdirs: list[s
             continue
         card = Card(volume=v, card_id=cid, card_id_norm=normalize_card_id(cid))
         if list_files:
-            card.files, card.problems = list_media_files(v, media_subdirs, extensions, recursive, min_size)
+            card.files, card.problems, card.warnings = list_media_files(v, media_subdirs, extensions, recursive, min_size)
+            if 0 < len(card.files) < min_file_count:
+                card.problems.append(f"動画が{len(card.files)}枚しかありません（カメラ不調の疑い）。コピーしません")
         cards.append(card)
     # 同じIDのカードが複数挿さっている場合は両方止める
     counts: dict[str, int] = {}
