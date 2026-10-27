@@ -52,7 +52,10 @@ class IngestPage(QWidget):
         self.rescan_btn.clicked.connect(lambda: self.ctx.ingest.rescan_now())
         self.clear_btn = QPushButton("完了分を一覧から消す")
         self.clear_btn.clicked.connect(self._clear_done)
-        for w in (self.auto_chk, self.pause_btn, self.start_btn, self.rescan_btn, self.clear_btn):
+        self.diag_btn = QPushButton("診断")
+        self.diag_btn.setToolTip("Windows が認識している全ボリュームと id.txt の状態を一覧にします")
+        self.diag_btn.clicked.connect(self._diagnostics)
+        for w in (self.auto_chk, self.pause_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.diag_btn):
             ops.addWidget(w)
         ops.addStretch(1)
         self.summary_label = QLabel("")
@@ -152,6 +155,32 @@ class IngestPage(QWidget):
 
     def _on_job_updated(self, job) -> None:
         self._dirty = True
+
+    def _diagnostics(self) -> None:
+        from ...core.volumes import diagnostics
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout
+        s = self.ctx.settings
+        exclude = list(s.exclude_volumes) + [p for p in (s.dest_root, s.nas_root) if p]
+        try:
+            text = diagnostics(s.scan_roots, exclude, s.id_file_name)
+        except Exception as e:  # pragma: no cover
+            text = f"診断でエラー: {e}"
+        jobs = ", ".join(f"{j.card.volume.display}={j.card.card_id}" for j in self.ctx.ingest.jobs.values())
+        text += f"\n\nアプリが検出中のカード ({len(self.ctx.ingest.jobs)}): {jobs}"
+        dlg = QDialog(self)
+        dlg.setWindowTitle("ボリューム診断")
+        dlg.resize(1100, 600)
+        lay = QVBoxLayout(dlg)
+        box = QPlainTextEdit(text)
+        box.setReadOnly(True)
+        box.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        lay.addWidget(box)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(dlg.reject)
+        btns.accepted.connect(dlg.accept)
+        lay.addWidget(btns)
+        self._append_log("診断:\n" + text)
+        dlg.exec()
 
     def _append_log(self, msg: str) -> None:
         self.log.appendPlainText(time.strftime("%H:%M:%S ") + msg)

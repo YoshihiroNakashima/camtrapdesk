@@ -31,11 +31,25 @@ class Volume:
 # Windows
 # ----------------------------------------------------------------------------
 
-def _windows_volumes() -> list[Volume]:
+@dataclass
+class VolumeDiag:
+    """診断用: Windows が列挙した全ボリュームの生の情報。"""
+    guid: str
+    drive_type: int
+    mounts: list[str]
+    label: str
+    fs: str
+    info_ok: bool
+    error: int
+    included: bool
+    reason: str
+
+
+def _windows_enumerate() -> list[VolumeDiag]:
     import ctypes
     from ctypes import wintypes
 
-    k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     k32.FindFirstVolumeW.restype = wintypes.HANDLE
     k32.FindFirstVolumeW.argtypes = [wintypes.LPWSTR, wintypes.DWORD]
     k32.FindNextVolumeW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD]
@@ -49,54 +63,95 @@ def _windows_volumes() -> list[Volume]:
         ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD), wintypes.LPWSTR, wintypes.DWORD]
 
     INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
-    DRIVE_REMOVABLE, DRIVE_FIXED, DRIVE_REMOTE, DRIVE_CDROM = 2, 3, 4, 5
-    # エラーダイアログ（"ディスクを挿入してください"）を出さない
-    SEM_FAILCRITICALERRORS = 0x0001
+    DRIVE_REMOTE, DRIVE_CDROM = 4, 5
+    SEM_FAILCRITICALERRORS = 0x0001   # "ディスクを挿入してください" のダイアログを出さない
     old_mode = k32.SetErrorMode(SEM_FAILCRITICALERRORS)
-
     system_drive = os.environ.get("SystemDrive", "C:").upper()
-    results: list[Volume] = []
+    out: list[VolumeDiag] = []
     buf = ctypes.create_unicode_buffer(1024)
     h = k32.FindFirstVolumeW(buf, len(buf))
     if h == INVALID_HANDLE_VALUE or h is None:
         k32.SetErrorMode(old_mode)
-        return results
+        return out
     try:
         while True:
             guid_path = buf.value  # 例: \\?\Volume{...}\
             dtype = k32.GetDriveTypeW(guid_path)
+            names = ctypes.create_unicode_buffer(8192)
+            retlen = wintypes.DWORD(0)
+            mounts: list[str] = []
+            if k32.GetVolumePathNamesForVolumeNameW(guid_path, names, len(names), ctypes.byref(retlen)):
+                mounts = [m for m in names[: retlen.value].split("\x00") if m]
+            label_buf = ctypes.create_unicode_buffer(261)
+            fs_buf = ctypes.create_unicode_buffer(261)
+            serial = wintypes.DWORD(0)
+            maxcomp = wintypes.DWORD(0)
+            flags = wintypes.DWORD(0)
+            ok = bool(k32.GetVolumeInformationW(guid_path, label_buf, 261, ctypes.byref(serial),
+                                                ctypes.byref(maxcomp), ctypes.byref(flags), fs_buf, 261))
+            err = 0 if ok else ctypes.get_last_error()
+            is_system = any(m.upper().startswith(system_drive + "\\") for m in mounts)
             if dtype in (DRIVE_REMOTE, DRIVE_CDROM):
-                pass
+                included, reason = False, "ネットワーク/光学ドライブ"
+            elif is_system:
+                included, reason = False, "システムドライブ"
+            elif not ok:
+                included, reason = False, f"ボリューム情報を取得できません (Win32 error {err})"
             else:
-                # マウントポイント（ドライブレター or フォルダ）
-                names = ctypes.create_unicode_buffer(4096)
-                retlen = wintypes.DWORD(0)
-                mounts: list[str] = []
-                if k32.GetVolumePathNamesForVolumeNameW(guid_path, names, len(names), ctypes.byref(retlen)):
-                    raw = names[: retlen.value]
-                    mounts = [m for m in raw.split("\x00") if m]
-                is_system = any(m.upper().startswith(system_drive + "\\") for m in mounts)
-                # ラベルとファイルシステム
-                label_buf = ctypes.create_unicode_buffer(261)
-                fs_buf = ctypes.create_unicode_buffer(261)
-                serial = wintypes.DWORD(0)
-                maxcomp = wintypes.DWORD(0)
-                flags = wintypes.DWORD(0)
-                ok = k32.GetVolumeInformationW(guid_path, label_buf, 261, ctypes.byref(serial),
-                                               ctypes.byref(maxcomp), ctypes.byref(flags), fs_buf, 261)
-                if ok and not is_system:
-                    label = label_buf.value
-                    display = mounts[0].rstrip("\\") if mounts else "(レター無し)"
-                    kind = "removable" if dtype == DRIVE_REMOVABLE else ("fixed" if dtype == DRIVE_FIXED else "unknown")
-                    # アクセスはレターがあればレター経由（エクスプローラーと同じ見え方）、無ければGUIDパス
-                    root = mounts[0] if mounts else guid_path
-                    results.append(Volume(key=guid_path, root=root, display=display, label=label, kind=kind))
+                included, reason = True, ""
+            out.append(VolumeDiag(guid=guid_path, drive_type=dtype, mounts=mounts, label=label_buf.value,
+                                  fs=fs_buf.value, info_ok=ok, error=err, included=included, reason=reason))
             if not k32.FindNextVolumeW(h, buf, len(buf)):
                 break
     finally:
         k32.FindVolumeClose(h)
         k32.SetErrorMode(old_mode)
+    return out
+
+
+def _windows_volumes() -> list[Volume]:
+    DRIVE_REMOVABLE, DRIVE_FIXED = 2, 3
+    results: list[Volume] = []
+    for d in _windows_enumerate():
+        if not d.included:
+            continue
+        display = d.mounts[0].rstrip("\\") if d.mounts else "(レター無し)"
+        kind = "removable" if d.drive_type == DRIVE_REMOVABLE else ("fixed" if d.drive_type == DRIVE_FIXED else "unknown")
+        # アクセスはレターがあればレター経由（エクスプローラーと同じ見え方）、無ければGUIDパス
+        root = d.mounts[0] if d.mounts else d.guid
+        results.append(Volume(key=d.guid, root=root, display=display, label=d.label, kind=kind))
     return results
+
+
+def diagnostics(scan_roots: Iterable[str] = (), exclude: Iterable[str] = (), id_file_name: str = "id.txt") -> str:
+    """全ボリュームの状態を人が読める形で返す（取り込み画面の「診断」）。"""
+    lines: list[str] = []
+    ex = {os.path.normcase(os.path.normpath(e)) for e in exclude if e}
+    if sys.platform == "win32":
+        diags = _windows_enumerate()
+        lines.append(f"Windows が列挙したボリューム: {len(diags)} 個")
+        for d in diags:
+            mounts = ", ".join(m.rstrip("\\") for m in d.mounts) if d.mounts else "(レター無し)"
+            state = "対象" if d.included else f"対象外: {d.reason}"
+            root = d.mounts[0] if d.mounts else d.guid
+            if os.path.normcase(os.path.normpath(root)) in ex or d.guid in ex:
+                state = "対象外: 除外設定（保存先/NAS/除外ボリューム）"
+            idtxt = ""
+            if d.included:
+                p = os.path.join(root, id_file_name)
+                try:
+                    with open(p, "r", encoding="utf-8-sig", errors="replace") as f:
+                        first = f.readline().strip()
+                    idtxt = f"{id_file_name}='{first}'" if first else f"{id_file_name} は空"
+                except FileNotFoundError:
+                    idtxt = f"{id_file_name} なし"
+                except OSError as e:
+                    idtxt = f"{id_file_name} 読み取りエラー: {e}"
+            lines.append(f"  {mounts:14s} {d.label:16s} type={d.drive_type} fs={d.fs:6s} {state} {idtxt}  {d.guid}")
+    else:
+        for v in list_volumes(scan_roots, exclude):
+            lines.append(f"  {v.display:14s} {v.label:16s} {v.kind} {v.root}")
+    return "\n".join(lines)
 
 
 # ----------------------------------------------------------------------------

@@ -29,15 +29,24 @@ def normalize_card_id(raw: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", s).upper()
 
 
-def read_card_id(volume: Volume, id_file_name: str) -> str | None:
+def read_card_id_with_reason(volume: Volume, id_file_name: str) -> tuple[str | None, str]:
+    """id.txt の1行目を読む。戻り値は (カードID, 理由)。読めないときは ID が None で理由が入る。"""
     p = volume.join(id_file_name)
     try:
         with open(p, "r", encoding="utf-8-sig", errors="replace") as f:
             first = f.readline()
-    except OSError:
-        return None
-    s = first.strip()
-    return s or None
+    except FileNotFoundError:
+        return None, f"{id_file_name} がありません"
+    except OSError as e:
+        return None, f"{id_file_name} を読めません ({e.strerror or e})"
+    s = first.strip().replace("\x00", "")
+    if not s:
+        return None, f"{id_file_name} の1行目が空です"
+    return s, "ok"
+
+
+def read_card_id(volume: Volume, id_file_name: str) -> str | None:
+    return read_card_id_with_reason(volume, id_file_name)[0]
 
 
 @dataclass

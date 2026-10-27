@@ -15,7 +15,7 @@ from typing import Callable
 
 from ..config import Settings
 from . import ledger as L
-from .cards import Card, detect_cards
+from .cards import Card, detect_cards, read_card_id_with_reason
 from .hashing import copy_with_hash, hash_file
 from .volumes import list_volumes
 
@@ -78,6 +78,7 @@ class IngestManager:
         self._active = 0
         self._batch_counted = True
         self.paused = False
+        self._skipped_reported: set[str] = set()   # id.txt が無い等で対象外にしたボリューム（1回だけ記録）
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -135,6 +136,16 @@ class IngestManager:
         cards = detect_cards(vols, s.id_file_name, s.media_subdirs, s.media_extensions,
                              s.media_recursive, s.min_file_size_bytes, list_files=True)
         present = {c.volume.key for c in cards}
+        # カードとして扱えなかったリムーバブルボリュームを、理由付きで1回だけログに出す
+        for v in vols:
+            if v.key in present or v.kind not in ("removable", "virtual"):
+                continue
+            if v.key in self._skipped_reported:
+                continue
+            _cid, reason = read_card_id_with_reason(v, s.id_file_name)
+            self._skipped_reported.add(v.key)
+            self.on_log(f"ボリューム {v.display}（{v.label or 'ラベル無し'}）は対象外: {reason}")
+        self._skipped_reported &= {v.key for v in vols}
         new_jobs: list[CardJob] = []
         with self._lock:
             # 抜かれたカード
