@@ -1,0 +1,197 @@
+"""名前変更画面: 野帳を読み、Type と Season を選び、ドライランを確認してからフォルダ名を地点名に変更する。"""
+
+from __future__ import annotations
+
+from PySide6.QtWidgets import (QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
+                               QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout, QWidget, QSplitter)
+from PySide6.QtCore import Qt
+
+from ...core import rename as R
+from ...core.fieldnote import Fieldnote, build_mapping, load_fieldnote
+from ..context import AppContext
+from ..widgets import COLORS, PathRow, make_table, set_row
+
+
+class RenamePage(QWidget):
+    def __init__(self, ctx: AppContext, parent=None):
+        super().__init__(parent)
+        self.ctx = ctx
+        self.fieldnote: Fieldnote | None = None
+        self.plan: R.RenamePlan | None = None
+        s = ctx.settings
+
+        root = QVBoxLayout(self)
+        box = QGroupBox("野帳と対象")
+        form = QFormLayout(box)
+        self.path_row = PathRow(s.fieldnote_path, mode="file", placeholder="野帳写し.xlsx")
+        form.addRow("野帳（Excel）", self.path_row)
+        h = QHBoxLayout()
+        self.sheet_combo = QComboBox()
+        self.load_btn = QPushButton("野帳を読み込む")
+        self.load_btn.clicked.connect(self.load_fieldnote)
+        h.addWidget(QLabel("シート"))
+        h.addWidget(self.sheet_combo)
+        h.addWidget(self.load_btn)
+        h.addStretch(1)
+        form.addRow("", h)
+        h2 = QHBoxLayout()
+        self.type_combo = QComboBox()
+        self.type_combo.currentTextChanged.connect(self._type_changed)
+        self.season_combo = QComboBox()
+        self.sd_ret = QRadioButton("RetrievalSD（回収したカード）")
+        self.sd_ret.setChecked(True)
+        self.sd_inst = QRadioButton("InstallationSD（設置したカード）")
+        h2.addWidget(QLabel("Type"))
+        h2.addWidget(self.type_combo)
+        h2.addWidget(QLabel("Season"))
+        h2.addWidget(self.season_combo)
+        h2.addWidget(QLabel("照合する列:"))
+        h2.addWidget(self.sd_ret)
+        h2.addWidget(self.sd_inst)
+        h2.addStretch(1)
+        form.addRow("対象", h2)
+        h3 = QHBoxLayout()
+        self.root_combo = QComboBox()
+        self.root_combo.addItems(["保存先（中継）", "NAS"])
+        self.dry_btn = QPushButton("ドライラン（確認）")
+        self.dry_btn.clicked.connect(self.dry_run)
+        self.apply_btn = QPushButton("変更を実行")
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.clicked.connect(self.apply)
+        h3.addWidget(QLabel("変更するフォルダの場所"))
+        h3.addWidget(self.root_combo)
+        h3.addWidget(self.dry_btn)
+        h3.addWidget(self.apply_btn)
+        h3.addStretch(1)
+        form.addRow("実行", h3)
+        root.addWidget(box)
+
+        split = QSplitter(Qt.Orientation.Vertical)
+        self.table = make_table(["結果", "カードID", "現在のフォルダ", "変更後", "野帳行", "日付", "State", "理由・注意"])
+        split.addWidget(self.table)
+        self.issues = QPlainTextEdit()
+        self.issues.setReadOnly(True)
+        split.addWidget(self.issues)
+        split.setSizes([420, 140])
+        root.addWidget(split, 1)
+        ctx.settings_changed.connect(self._settings_changed)
+
+    def _settings_changed(self) -> None:
+        if not self.path_row.text():
+            self.path_row.setText(self.ctx.settings.fieldnote_path)
+
+    # ------------------------------------------------------------------
+    def load_fieldnote(self) -> None:
+        path = self.path_row.text()
+        if not path:
+            QMessageBox.warning(self, "野帳", "野帳のExcelファイルを指定してください。")
+            return
+        try:
+            sheet = self.sheet_combo.currentText() or None
+            fn = load_fieldnote(path, self.ctx.settings, sheet)
+        except Exception as e:
+            QMessageBox.critical(self, "野帳の読み込み", f"読み込めませんでした:\n{e}")
+            return
+        self.fieldnote = fn
+        if path != self.ctx.settings.fieldnote_path:
+            self.ctx.settings.fieldnote_path = path
+            self.ctx.save()
+        self.sheet_combo.blockSignals(True)
+        self.sheet_combo.clear()
+        self.sheet_combo.addItems(fn.sheets)
+        self.sheet_combo.setCurrentText(fn.sheet)
+        self.sheet_combo.blockSignals(False)
+        self.type_combo.blockSignals(True)
+        self.type_combo.clear()
+        self.type_combo.addItems(fn.types())
+        default_type = self.ctx.settings.default_type
+        if default_type in fn.types():
+            self.type_combo.setCurrentText(default_type)
+        self.type_combo.blockSignals(False)
+        self._type_changed(self.type_combo.currentText())
+        self.issues.setPlainText(f"読み込みました: {len(fn.rows)} 行、Type: {', '.join(fn.types()[:8])}")
+        self.apply_btn.setEnabled(False)
+
+    def _type_changed(self, t: str) -> None:
+        self.season_combo.clear()
+        if self.fieldnote and t:
+            self.season_combo.addItems(self.fieldnote.seasons(t))
+            # 取り込み中のシーズンがあればそれを選ぶ
+            cur = self.ctx.settings.season_folder
+            rule = self.ctx.settings.rule_for(t)
+            for i in range(self.season_combo.count()):
+                if rule.season_prefix + self.season_combo.itemText(i) == cur:
+                    self.season_combo.setCurrentIndex(i)
+                    break
+
+    def _root(self) -> tuple[str, str | None]:
+        s = self.ctx.settings
+        if self.root_combo.currentIndex() == 1:
+            return s.nas_root, None
+        return s.dest_root, (s.nas_root or None)
+
+    def dry_run(self) -> None:
+        if not self.fieldnote:
+            self.load_fieldnote()
+            if not self.fieldnote:
+                return
+        t = self.type_combo.currentText()
+        season = self.season_combo.currentText()
+        if not t or not season:
+            QMessageBox.warning(self, "対象", "Type と Season を選んでください。")
+            return
+        root, nas_root = self._root()
+        if not root:
+            QMessageBox.warning(self, "フォルダ", "変更するフォルダの場所（保存先かNAS）が設定されていません。")
+            return
+        mapping = build_mapping(self.fieldnote, t, season, self.ctx.settings, use_installation=self.sd_inst.isChecked())
+        plan = R.build_plan(root, nas_root, mapping, self.ctx.ledger)
+        self.plan = plan
+        self._show_plan(plan)
+        self.apply_btn.setEnabled(plan.count(R.A_RENAME) > 0)
+
+    def _show_plan(self, plan: R.RenamePlan) -> None:
+        order = {R.A_RENAME: 0, R.A_BLOCKED: 1, R.A_TARGET_EXISTS: 2, R.A_SYNCING: 3, R.A_MISSING: 4,
+                 R.A_UNMAPPED: 5, R.A_ALREADY: 6}
+        items = sorted(plan.items, key=lambda i: (order.get(i.action, 9), i.dst_dir_name or i.src_dir_name))
+        self.table.setRowCount(len(items))
+        for r, it in enumerate(items):
+            color = {R.A_RENAME: COLORS["ok"], R.A_ALREADY: COLORS["muted"], R.A_MISSING: COLORS["warn"],
+                     R.A_UNMAPPED: COLORS["warn"], R.A_BLOCKED: COLORS["err"],
+                     R.A_TARGET_EXISTS: COLORS["err"], R.A_SYNCING: COLORS["info"]}.get(it.action)
+            if it.action == R.A_RENAME and it.warnings:
+                color = COLORS["warn"]
+            e = it.entry
+            note = "; ".join(filter(None, [it.reason] + it.warnings))
+            set_row(self.table, r, [R.ACTION_LABELS.get(it.action, it.action), it.card_id, it.src_dir_name,
+                                    it.dst_dir_name, str(e.row_no) if e else "", e.date if e else "",
+                                    e.state if e else "", note], color)
+        lines = [f"シーズンフォルダ: {plan.season_dir}",
+                 f"変更 {plan.count(R.A_RENAME)} / 保留 {plan.count(R.A_BLOCKED)} / 変更先が既存 {plan.count(R.A_TARGET_EXISTS)}"
+                 f" / NAS転送中 {plan.count(R.A_SYNCING)} / フォルダ無し {plan.count(R.A_MISSING)}"
+                 f" / 野帳に無い {plan.count(R.A_UNMAPPED)} / 変更済み {plan.count(R.A_ALREADY)}"]
+        if plan.issues:
+            lines.append("")
+            lines.append("【野帳側で確認が必要な点】")
+            lines += [" - " + x for x in plan.issues]
+        self.issues.setPlainText("\n".join(lines))
+
+    def apply(self) -> None:
+        if not self.plan:
+            return
+        n = self.plan.count(R.A_RENAME)
+        warn = sum(1 for i in self.plan.items if i.action == R.A_RENAME and i.warnings)
+        msg = f"{n} 個のフォルダ名を地点名に変更します。"
+        if warn:
+            msg += f"\nそのうち {warn} 個には注意（前回設置SDとの不一致など）が付いています。"
+        msg += "\n\n実行しますか？"
+        if QMessageBox.question(self, "変更の実行", msg) != QMessageBox.StandardButton.Yes:
+            return
+        logs: list[str] = []
+        done, errors = R.apply_plan(self.plan, self.ctx.ledger, log=logs.append)
+        text = f"{done} 件を変更しました。\n" + "\n".join(logs[:50])
+        if errors:
+            text += "\n\n【エラー】\n" + "\n".join(errors)
+        self.issues.setPlainText(text)
+        self.apply_btn.setEnabled(False)
+        self.dry_run()

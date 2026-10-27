@@ -1,0 +1,308 @@
+"""取り込み（ingest）: 挿入されたカードを検出し、並列にコピーして検証し、台帳に記録する。
+
+GUI に依存しない。進捗はコールバックで通知するので、UI 側で Qt のシグナルに載せ替える。
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from typing import Callable
+
+from ..config import Settings
+from . import ledger as L
+from .cards import Card, detect_cards
+from .hashing import copy_with_hash, hash_file
+from .volumes import list_volumes
+
+# ジョブの状態
+S_DETECTED = "detected"      # 検出済み（自動開始オフのとき）
+S_QUEUED = "queued"          # 待機中
+S_COPYING = "copying"
+S_VERIFYING = "verifying"
+S_DONE = "done"              # 中継先で検証済み（抜いてよい）
+S_SKIPPED = "skipped"        # 取り込み済みなどで何もしなかった
+S_ERROR = "error"
+S_REMOVED = "removed"        # 処理中に抜かれた
+
+STATE_LABELS = {
+    S_DETECTED: "検出",
+    S_QUEUED: "待機中",
+    S_COPYING: "コピー中",
+    S_VERIFYING: "検証中",
+    S_DONE: "完了（抜いてOK）",
+    S_SKIPPED: "スキップ",
+    S_ERROR: "エラー",
+    S_REMOVED: "抜かれました",
+}
+
+
+@dataclass
+class CardJob:
+    key: str
+    card: Card
+    state: str = S_DETECTED
+    message: str = ""
+    done_bytes: int = 0
+    total_bytes: int = 0
+    done_files: int = 0
+    ingest_id: int | None = None
+    started: float = field(default_factory=time.time)
+    finished: float | None = None
+
+    @property
+    def progress(self) -> float:
+        return (self.done_bytes / self.total_bytes) if self.total_bytes else (1.0 if self.state == S_DONE else 0.0)
+
+
+class IngestManager:
+    """ボリュームを監視し、カードを検出して取り込むバックグラウンド処理。"""
+
+    def __init__(self, get_settings: Callable[[], Settings], ledger: L.Ledger,
+                 on_update: Callable[[CardJob], None], on_log: Callable[[str], None],
+                 on_batch_done: Callable[[int], None] | None = None):
+        self.get_settings = get_settings
+        self.ledger = ledger
+        self.on_update = on_update
+        self.on_log = on_log
+        self.on_batch_done = on_batch_done
+        self.jobs: dict[str, CardJob] = {}
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._pool: ThreadPoolExecutor | None = None
+        self._active = 0
+        self._batch_counted = True
+        self.paused = False
+
+    # ------------------------------------------------------------ lifecycle
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        s = self.get_settings()
+        self._pool = ThreadPoolExecutor(max_workers=max(1, int(s.concurrency)), thread_name_prefix="ingest")
+        self._thread = threading.Thread(target=self._poll_loop, name="ingest-poll", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._pool:
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            self._pool = None
+
+    def rescan_now(self) -> None:
+        self._scan_once()
+
+    def enqueue(self, key: str) -> None:
+        with self._lock:
+            job = self.jobs.get(key)
+            if not job or job.state not in (S_DETECTED, S_ERROR, S_SKIPPED):
+                return
+            job.state = S_QUEUED
+            job.message = ""
+            job.done_bytes = 0
+            job.done_files = 0
+            self._batch_counted = False
+        self.on_update(job)
+        if self._pool:
+            self._pool.submit(self._run_job, key)
+
+    def remove_job(self, key: str) -> None:
+        with self._lock:
+            self.jobs.pop(key, None)
+
+    # ----------------------------------------------------------------- poll
+    def _poll_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._scan_once()
+            except Exception as e:  # pragma: no cover
+                self.on_log(f"スキャンでエラー: {e}")
+            self._stop.wait(max(0.5, float(self.get_settings().poll_interval_sec)))
+
+    def _scan_once(self) -> None:
+        s = self.get_settings()
+        exclude = list(s.exclude_volumes)
+        for p in (s.dest_root, s.nas_root):
+            if p:
+                exclude.append(p)
+        vols = list_volumes(s.scan_roots, exclude)
+        cards = detect_cards(vols, s.id_file_name, s.media_subdirs, s.media_extensions,
+                             s.media_recursive, s.min_file_size_bytes, list_files=True)
+        present = {c.volume.key for c in cards}
+        new_jobs: list[CardJob] = []
+        with self._lock:
+            # 抜かれたカード
+            for key, job in list(self.jobs.items()):
+                if key not in present:
+                    if job.state in (S_COPYING, S_VERIFYING, S_QUEUED):
+                        job.state = S_REMOVED
+                        job.message = "処理中にカードが抜かれました"
+                        self.on_update(job)
+                        self.on_log(f"[{job.card.card_id}] 処理中にカードが抜かれました")
+                    self.jobs.pop(key, None)
+            # 新しいカード
+            for c in cards:
+                if c.volume.key in self.jobs:
+                    continue
+                job = CardJob(key=c.volume.key, card=c, total_bytes=c.total_bytes)
+                if c.problems:
+                    job.state = S_ERROR
+                    job.message = "; ".join(c.problems)
+                self.jobs[c.volume.key] = job
+                new_jobs.append(job)
+        for job in new_jobs:
+            self.on_update(job)
+            if job.state == S_ERROR:
+                self.on_log(f"[{job.card.card_id}] {job.message}")
+            elif s.auto_start_ingest and not self.paused:
+                self.enqueue(job.key)
+            else:
+                self.on_log(f"[{job.card.card_id}] 検出（{job.card.n_files}ファイル, {job.card.total_bytes/1e9:.2f} GB）")
+        self._check_batch_done()
+
+    def _check_batch_done(self) -> None:
+        with self._lock:
+            if self._batch_counted:
+                return
+            active = [j for j in self.jobs.values() if j.state in (S_QUEUED, S_COPYING, S_VERIFYING)]
+            if active:
+                return
+            self._batch_counted = True
+            n = sum(1 for j in self.jobs.values() if j.state == S_DONE)
+        if self.on_batch_done:
+            self.on_batch_done(n)
+
+    # ------------------------------------------------------------------ job
+    def _set(self, job: CardJob, state: str | None = None, message: str | None = None) -> None:
+        with self._lock:
+            if state:
+                job.state = state
+            if message is not None:
+                job.message = message
+        self.on_update(job)
+
+    def _run_job(self, key: str) -> None:
+        with self._lock:
+            job = self.jobs.get(key)
+        if not job or job.state != S_QUEUED:
+            return
+        try:
+            self._ingest_card(job)
+        except Exception as e:
+            self.ledger.event("error", f"{job.card.card_id}: {e}", job.card.card_id)
+            if job.ingest_id:
+                self.ledger.update_ingest(job.ingest_id, status=L.STATUS_ERROR, message=str(e), finished_at=L.now_iso())
+            self._set(job, S_ERROR, f"失敗: {e}")
+            self.on_log(f"[{job.card.card_id}] 失敗: {e}\n{traceback.format_exc(limit=3)}")
+        finally:
+            job.finished = time.time()
+            self._check_batch_done()
+
+    def _ingest_card(self, job: CardJob) -> None:
+        s = self.get_settings()
+        card = job.card
+        cid = card.card_id
+        if not s.season_folder.strip():
+            self._set(job, S_ERROR, "取り込み先のシーズンフォルダ名が未設定です（例: N260710）")
+            return
+        if not s.dest_root or not os.path.isdir(s.dest_root):
+            self._set(job, S_ERROR, f"保存先が見つかりません: {s.dest_root}")
+            return
+        if card.problems:
+            self._set(job, S_ERROR, "; ".join(card.problems))
+            return
+        if not card.files:
+            self._set(job, S_SKIPPED, "対象ファイルがありません")
+            return
+
+        # 前回取り込み済み（削除未実施）のカードを検出
+        prev = self.ledger.latest_ingest_for_card(card.card_id_norm)
+        if prev and prev.status in (L.STATUS_STAGED, L.STATUS_SYNCED) and not prev.cleared_at:
+            prev_files = {(f.name, f.size) for f in self.ledger.files_for(prev.id) if not f.deleted_at}
+            cur_files = {(f.name, f.size) for f in card.files}
+            if prev_files and cur_files <= prev_files:
+                self._set(job, S_SKIPPED,
+                          f"取り込み済みです（{prev.season_folder}/{prev.dir_name}、{prev.finished_at}）。削除は「削除」タブから")
+                self.on_log(f"[{cid}] 取り込み済みのためスキップ")
+                return
+
+        season_folder = s.season_folder.strip()
+        dir_name = cid
+        dest_dir = os.path.join(s.dest_root, season_folder, dir_name)
+        # 既存フォルダ: 同名ファイルがあれば、中断の再開として扱えるか manifest で判定する
+        existing_manifest = L.Ledger.read_manifest(dest_dir) if os.path.isdir(dest_dir) else None
+        existing_hashes: dict[str, tuple[int, str]] = {}
+        if existing_manifest:
+            for f in existing_manifest.get("files", []):
+                if f.get("hash"):
+                    existing_hashes[f["name"]] = (int(f["size"]), f["hash"])
+        if os.path.isdir(dest_dir):
+            present = {n for n in os.listdir(dest_dir) if not n.endswith(".part") and n != L.MANIFEST_NAME}
+            clash = [f.name for f in card.files if f.name in present and f.name not in existing_hashes]
+            if clash:
+                self._set(job, S_ERROR, f"保存先に同名ファイルが既にあります（{clash[0]} ほか{len(clash)}件）。上書きしません")
+                return
+        os.makedirs(dest_dir, exist_ok=True)
+
+        ingest_id = self.ledger.create_ingest(cid, card.card_id_norm, season_folder, dir_name, s.dest_root,
+                                              s.nas_root or None, card.volume.key, card.volume.label,
+                                              card.n_files, card.total_bytes)
+        job.ingest_id = ingest_id
+        self.ledger.add_files(ingest_id, [(f.name, f.size, f.mtime, f.src_path) for f in card.files])
+        self.ledger.event("ingest_start", f"{season_folder}/{dir_name} {card.n_files} files", cid)
+        self._set(job, S_COPYING, f"コピー中 0/{card.n_files}")
+        self.on_log(f"[{cid}] コピー開始 → {dest_dir}（{card.n_files}ファイル, {card.total_bytes/1e9:.2f} GB）")
+
+        base_done = 0
+        for i, f in enumerate(card.files, 1):
+            if self._stop.is_set():
+                raise RuntimeError("停止されました")
+            dst = os.path.join(dest_dir, f.name)
+            # 再開: 既に検証済みのファイルは飛ばす
+            if f.name in existing_hashes and os.path.isfile(dst) and os.path.getsize(dst) == f.size:
+                size_, h = existing_hashes[f.name]
+                if size_ == f.size:
+                    self.ledger.set_file_hash(ingest_id, f.name, h, True)
+                    base_done += f.size
+                    job.done_bytes = base_done
+                    job.done_files = i
+                    self._set(job, message=f"コピー中 {i}/{card.n_files}（再開）")
+                    continue
+
+            def prog(n: int, base=base_done):
+                job.done_bytes = base + n
+                self.on_update(job)
+
+            try:
+                nbytes, h = copy_with_hash(f.src_path, dst, prog)
+            except OSError as e:
+                raise RuntimeError(f"{f.name} のコピーに失敗: {e}") from e
+            if nbytes != f.size:
+                raise RuntimeError(f"{f.name}: サイズ不一致（元 {f.size} / コピー {nbytes}）")
+            ok = True
+            if s.verify_readback:
+                self._set(job, S_VERIFYING, f"検証中 {i}/{card.n_files}")
+                h2 = hash_file(dst)
+                ok = (h2 == h)
+                if not ok:
+                    raise RuntimeError(f"{f.name}: 読み戻しハッシュ不一致")
+            self.ledger.set_file_hash(ingest_id, f.name, h, ok)
+            base_done += f.size
+            job.done_bytes = base_done
+            job.done_files = i
+            self._set(job, S_COPYING, f"コピー中 {i}/{card.n_files}")
+
+        ts = L.now_iso()
+        self.ledger.update_ingest(ingest_id, status=L.STATUS_STAGED, finished_at=ts, staging_verified_at=ts,
+                                  message="中継先で検証済み")
+        self.ledger.write_manifest(ingest_id, dest_dir)
+        self.ledger.event("ingest_done", f"{season_folder}/{dir_name}", cid)
+        nas_note = "。NASへの転送はバックグラウンドで続きます" if s.nas_root else ""
+        self._set(job, S_DONE, f"完了: {card.n_files}ファイル検証済み{nas_note}")
+        self.on_log(f"[{cid}] 完了（{card.n_files}ファイル, {card.total_bytes/1e9:.2f} GB）")

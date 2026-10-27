@@ -1,0 +1,131 @@
+"""ボリュームからSDカード（id.txt を持つもの）を検出し、対象ファイルを列挙する。"""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field
+
+from .volumes import Volume
+
+
+def normalize_card_id(raw: str) -> str:
+    """照合用のカードID。数字だけなら先頭の0を落とし、それ以外は英数字のみ大文字で残す。"""
+    s = (raw or "").strip()
+    if s.isdigit():
+        return str(int(s))
+    return re.sub(r"[^A-Za-z0-9]", "", s).upper()
+
+
+def read_card_id(volume: Volume, id_file_name: str) -> str | None:
+    p = volume.join(id_file_name)
+    try:
+        with open(p, "r", encoding="utf-8-sig", errors="replace") as f:
+            first = f.readline()
+    except OSError:
+        return None
+    s = first.strip()
+    return s or None
+
+
+@dataclass
+class MediaFile:
+    src_path: str
+    rel_dir: str      # media_subdir からの相対ディレクトリ（"" なら直下）
+    name: str         # ファイル名
+    size: int
+    mtime: float
+
+    @property
+    def dest_name(self) -> str:
+        return self.name
+
+
+@dataclass
+class Card:
+    volume: Volume
+    card_id: str                  # id.txt の内容（そのまま）
+    card_id_norm: str             # 照合用
+    files: list[MediaFile] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)   # 取り込みを止めるべき問題
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(f.size for f in self.files)
+
+    @property
+    def n_files(self) -> int:
+        return len(self.files)
+
+
+def list_media_files(volume: Volume, media_subdirs: list[str], extensions: list[str],
+                     recursive: bool, min_size: int) -> tuple[list[MediaFile], list[str]]:
+    """設定に従って対象ファイルを列挙する。戻り値は (ファイル一覧, 問題点)。"""
+    exts = {e.lower().lstrip(".") for e in extensions}
+    files: list[MediaFile] = []
+    problems: list[str] = []
+    found_dir = False
+    for sub in media_subdirs:
+        base = volume.join(*[p for p in re.split(r"[\\/]+", sub) if p])
+        if not os.path.isdir(base):
+            continue
+        found_dir = True
+        if recursive:
+            walker = os.walk(base)
+        else:
+            try:
+                names = sorted(os.listdir(base))
+            except OSError as e:
+                problems.append(f"フォルダを読めません: {sub} ({e})")
+                continue
+            walker = [(base, [], names)]
+        for dirpath, _dirs, names in walker:
+            rel_dir = os.path.relpath(dirpath, base)
+            rel_dir = "" if rel_dir == "." else rel_dir.replace("\\", "/")
+            for n in sorted(names):
+                ext = n.rsplit(".", 1)[-1].lower() if "." in n else ""
+                if ext not in exts:
+                    continue
+                p = os.path.join(dirpath, n)
+                try:
+                    st = os.stat(p)
+                except OSError as e:
+                    problems.append(f"読めないファイル: {n} ({e})")
+                    continue
+                if not os.path.isfile(p):
+                    continue
+                if st.st_size < min_size:
+                    problems.append(f"異常サイズ(<{min_size}B): {n}")
+                files.append(MediaFile(src_path=p, rel_dir=rel_dir, name=n, size=st.st_size, mtime=st.st_mtime))
+    if not found_dir:
+        problems.append("対象フォルダが見つかりません: " + ", ".join(media_subdirs))
+    # 平坦化した際の同名衝突
+    seen: dict[str, str] = {}
+    for f in files:
+        if f.name in seen and seen[f.name] != f.rel_dir:
+            problems.append(f"同名ファイルが複数フォルダにあります: {f.name}")
+        seen[f.name] = f.rel_dir
+    return files, problems
+
+
+def detect_cards(volumes: list[Volume], id_file_name: str, media_subdirs: list[str],
+                 extensions: list[str], recursive: bool, min_size: int,
+                 list_files: bool = True) -> list[Card]:
+    """id.txt を持つボリュームをカードとして返す。"""
+    cards: list[Card] = []
+    for v in volumes:
+        cid = read_card_id(v, id_file_name)
+        if not cid:
+            continue
+        card = Card(volume=v, card_id=cid, card_id_norm=normalize_card_id(cid))
+        if list_files:
+            card.files, card.problems = list_media_files(v, media_subdirs, extensions, recursive, min_size)
+        cards.append(card)
+    # 同じIDのカードが複数挿さっている場合は両方止める
+    counts: dict[str, int] = {}
+    for c in cards:
+        counts[c.card_id_norm] = counts.get(c.card_id_norm, 0) + 1
+    for c in cards:
+        if counts[c.card_id_norm] > 1:
+            c.problems.append(f"同じID({c.card_id})のカードが{counts[c.card_id_norm]}枚挿さっています")
+    return cards
