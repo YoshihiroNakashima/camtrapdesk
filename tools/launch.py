@@ -103,12 +103,15 @@ def main() -> None:
                 logf.write(f"venv create failed: {e}\n")
                 fail("仮想環境（.venv）の作成に失敗しました。")
         fix_conda_path()
-        if run([PY, "-c", "import camtrapdesk, PySide6, openpyxl, ssl, sqlite3"], logf) != 0:
-            say("ライブラリを取得中…（PySide6 は 150MB ほどあります）")
+        check = [PY, "-c", "import camtrapdesk.app, openpyxl, xxhash, ssl, sqlite3"]
+        if run(check, logf) != 0:
+            say("ライブラリを取得中…（PySide6 は 250MB ほどあります）")
             run([PY, "-m", "pip", "install", "--upgrade", "pip"], logf)
-            if run([PY, "-m", "pip", "install", "-e", ROOT], logf) != 0:
+            # パッケージ自体はこのフォルダから直接読み込む（インストールしない）ので、
+            # フォルダを別のドライブへ移しても動く。依存ライブラリだけ入れる。
+            if run([PY, "-m", "pip", "install", "-r", os.path.join(ROOT, "requirements.txt")], logf) != 0:
                 fail("ライブラリの取得に失敗しました。ネットワーク接続を確認して、もう一度実行してください。")
-            if run([PY, "-c", "import camtrapdesk, PySide6, openpyxl, ssl, sqlite3"], logf) != 0:
+            if run(check, logf) != 0:
                 fail("ライブラリの読み込みに失敗しました。.venv フォルダを削除してから、もう一度実行してください。")
             say("セットアップが終わりました。")
     say("camtrapdesk を起動します。")
