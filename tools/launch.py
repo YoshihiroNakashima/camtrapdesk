@@ -57,11 +57,41 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 
+def venv_home() -> str:
+    """.venv の元になった Python のフォルダ（pyvenv.cfg の home）。無ければ今の Python。"""
+    cfg = os.path.join(VENV, "pyvenv.cfg")
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            for line in f:
+                if line.lower().startswith("home"):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return os.path.dirname(sys.executable)
+
+
+def fix_conda_path() -> None:
+    """Anaconda/Miniconda の Python から作った venv は、conda を activate していないと
+    OpenSSL や SQLite の DLL（<conda>\\Library\\bin）が見つからず、pip がダウンロードできない・
+    アプリが sqlite3 を開けない。その DLL フォルダを PATH の先頭に足す（Windows のみ）。"""
+    if not IS_WIN:
+        return
+    home = venv_home()
+    cands = [home, os.path.dirname(home)]   # home が <conda> か <conda>\\bin のどちらでも
+    for base in cands:
+        libbin = os.path.join(base, "Library", "bin")
+        if os.path.isdir(libbin):
+            extra = [libbin, os.path.join(base, "Library", "usr", "bin"), os.path.join(base, "Scripts"),
+                     os.path.join(base, "DLLs"), base]
+            extra = [p for p in extra if os.path.isdir(p)]
+            os.environ["PATH"] = os.pathsep.join(extra + [os.environ.get("PATH", "")])
+            return
+
+
 def main() -> None:
     os.chdir(ROOT)
-    first = not os.path.exists(PY)
     with open(LOG, "a", encoding="utf-8") as logf:
-        if first:
+        if not os.path.exists(PY):
             say("=" * 60)
             say(" camtrapdesk 初回セットアップ")
             say(f" Python: {sys.executable} ({sys.version.split()[0]})")
@@ -72,18 +102,20 @@ def main() -> None:
             except Exception as e:
                 logf.write(f"venv create failed: {e}\n")
                 fail("仮想環境（.venv）の作成に失敗しました。")
+        fix_conda_path()
+        if run([PY, "-c", "import camtrapdesk, PySide6, openpyxl, ssl, sqlite3"], logf) != 0:
+            say("ライブラリを取得中…（PySide6 は 150MB ほどあります）")
             run([PY, "-m", "pip", "install", "--upgrade", "pip"], logf)
-            say("ライブラリを取得中…")
             if run([PY, "-m", "pip", "install", "-e", ROOT], logf) != 0:
                 fail("ライブラリの取得に失敗しました。ネットワーク接続を確認して、もう一度実行してください。")
+            if run([PY, "-c", "import camtrapdesk, PySide6, openpyxl, ssl, sqlite3"], logf) != 0:
+                fail("ライブラリの読み込みに失敗しました。.venv フォルダを削除してから、もう一度実行してください。")
             say("セットアップが終わりました。")
-        if run([PY, "-c", "import camtrapdesk, PySide6, openpyxl"], logf) != 0:
-            fail("ライブラリの読み込みに失敗しました。.venv フォルダを削除してから、もう一度実行してください。")
     say("camtrapdesk を起動します。")
     kwargs = {}
     if IS_WIN:
         kwargs["creationflags"] = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen([PYW, "-m", "camtrapdesk"], cwd=ROOT, **kwargs)
+    subprocess.Popen([PYW, "-m", "camtrapdesk"], cwd=ROOT, env=os.environ.copy(), **kwargs)
 
 
 if __name__ == "__main__":
