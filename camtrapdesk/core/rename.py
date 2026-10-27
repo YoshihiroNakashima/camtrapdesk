@@ -62,8 +62,12 @@ def build_plan(root: str, nas_root: str | None, mapping: Mapping, ledger: L.Ledg
     items: list[PlanItem] = []
     issues = list(mapping.issues)
     if not os.path.isdir(season_dir):
-        issues.append(f"シーズンフォルダがありません: {season_dir}")
-        return RenamePlan(root, nas_root, mapping.season_folder, items, issues)
+        try:
+            os.makedirs(season_dir, exist_ok=True)
+            issues.append(f"シーズンフォルダを作成しました（まだ取り込んだカードはありません）: {season_dir}")
+        except OSError as e:
+            issues.append(f"シーズンフォルダを作成できません: {season_dir} ({e})")
+            return RenamePlan(root, nas_root, mapping.season_folder, items, issues)
 
     existing = {d for d in os.listdir(season_dir) if os.path.isdir(os.path.join(season_dir, d))}
     # フォルダ名 → 正規化カードID（manifest があればその card_id を優先）

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 from PySide6.QtCore import QTimer, Qt
@@ -111,6 +112,16 @@ class IngestPage(QWidget):
         if v != self.ctx.settings.season_folder:
             self.ctx.settings.season_folder = v
             self.ctx.save()
+        self._ensure_season_dir()
+
+    def _ensure_season_dir(self) -> None:
+        """保存先にシーズンフォルダを先に作っておく（名前変更画面などから見えるように）。"""
+        s = self.ctx.settings
+        if s.dest_root and s.season_folder and os.path.isdir(s.dest_root):
+            try:
+                os.makedirs(os.path.join(s.dest_root, s.season_folder), exist_ok=True)
+            except OSError as e:
+                self._append_log(f"シーズンフォルダを作成できません: {e}")
 
     def _auto_toggled(self, on: bool) -> None:
         self.ctx.settings.auto_start_ingest = on
