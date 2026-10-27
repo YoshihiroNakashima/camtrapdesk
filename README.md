@@ -15,10 +15,10 @@
 
 ## 起動（ダブルクリック）
 
-- Windows: `起動.bat` をダブルクリック。初回だけ `.venv` を作ってライブラリを取得する（数分）。2回目以降はすぐ起動する。Python 3.10 以上が入っていない場合はメッセージが出るので、python.org からインストールして再度実行する。
+- Windows: `起動.bat` をダブルクリック。初回だけ、フォルダ内に `.venv` を作って PySide6 などを取得する（数分。進み具合は黒い画面に出る）。2回目以降はすぐ起動する。Python 3.10 以上が入っていない場合はその旨が表示され python.org が開くので、インストール（「Add python.exe to PATH」にチェック）後にもう一度実行する。
 - macOS: `起動.command` をダブルクリック（初回に「開発元を確認できない」と出たら右クリック→「開く」）。
 
-学生のPCに配る場合は、GitHub Actions が作る `camtrapdesk.exe`（Python 不要）を使う。
+実体は `tools/launch.py` で、表示は Python 側で行うのでコンソールの文字コードに左右されない。学生のPCに配る場合は、GitHub Actions が作る `camtrapdesk.exe`（Python 不要）を使う。
 
 ## 使い方（開発環境）
 
