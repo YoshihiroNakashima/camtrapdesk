@@ -79,7 +79,9 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
     assert rename_page.plan and rename_page.plan.count("rename") == 2
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     rename_page.apply()
-    assert (dest / "N260710" / "BSN0592").is_dir() and (nas / "N260710" / "BSN0735").is_dir()
+    # 中継のコピーは NAS 検証後に消えているので、NAS 側だけが地点名になる
+    assert (nas / "N260710" / "BSN0592").is_dir() and (nas / "N260710" / "BSN0735").is_dir()
+    assert not (dest / "N260710" / "318").exists() and not (dest / "N260710" / "BSN0592").exists()
     win.grab().save(str(tmp_path / "rename.png"))
 
     # 削除

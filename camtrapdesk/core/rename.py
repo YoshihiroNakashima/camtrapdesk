@@ -38,7 +38,12 @@ class PlanItem:
     warnings: list[str] = field(default_factory=list)
     entry: MapEntry | None = None
     ingest_id: int | None = None
-    in_nas: bool = False
+    in_staging: bool = False   # 中継側にフォルダがある
+    in_nas: bool = False       # NAS側にフォルダがある
+
+    @property
+    def where(self) -> str:
+        return "・".join([x for x, ok in (("中継", self.in_staging), ("NAS", self.in_nas)) if ok])
 
 
 @dataclass
@@ -53,28 +58,64 @@ class RenamePlan:
     def season_dir(self) -> str:
         return os.path.join(self.root, self.season_folder)
 
+    @property
+    def nas_season_dir(self) -> str | None:
+        return os.path.join(self.nas_root, self.season_folder) if self.nas_root else None
+
     def count(self, action: str) -> int:
         return sum(1 for i in self.items if i.action == action)
 
 
+def _same_path(a: str | None, b: str | None) -> bool:
+    if not a or not b:
+        return False
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
 def build_plan(root: str, nas_root: str | None, mapping: Mapping, ledger: L.Ledger | None) -> RenamePlan:
-    season_dir = os.path.join(root, mapping.season_folder)
+    """中継先と NAS の両方を見て計画を立てる。中継のコピーが（NAS検証後の自動削除で）無くても NAS 側だけ変更できる。"""
     items: list[PlanItem] = []
     issues = list(mapping.issues)
+    if _same_path(root, nas_root):
+        nas_root = None
+    if not root and nas_root:
+        root, nas_root = nas_root, None
+    plan = RenamePlan(root, nas_root or None, mapping.season_folder, items, issues)
+    if not root:
+        issues.append("変更するフォルダの場所（保存先かNAS）が設定されていません")
+        return plan
+    season_dir = plan.season_dir
     if not os.path.isdir(season_dir):
         try:
             os.makedirs(season_dir, exist_ok=True)
             issues.append(f"シーズンフォルダを作成しました（まだ取り込んだカードはありません）: {season_dir}")
         except OSError as e:
             issues.append(f"シーズンフォルダを作成できません: {season_dir} ({e})")
-            return RenamePlan(root, nas_root, mapping.season_folder, items, issues)
+            return plan
 
-    existing = {d for d in os.listdir(season_dir) if os.path.isdir(os.path.join(season_dir, d))}
+    # フォルダ名 → どこにあるか
+    locations: dict[str, dict[str, bool]] = {}
+    for key, sdir in (("staging", season_dir), ("nas", plan.nas_season_dir)):
+        if not sdir or not os.path.isdir(sdir):
+            continue
+        for d in os.listdir(sdir):
+            if os.path.isdir(os.path.join(sdir, d)):
+                locations.setdefault(d, {"staging": False, "nas": False})[key] = True
+    existing = set(locations)
+
+    def manifest_of(d: str):
+        for key, sdir in (("staging", season_dir), ("nas", plan.nas_season_dir)):
+            if sdir and locations[d][key]:
+                m = L.Ledger.read_manifest(os.path.join(sdir, d))
+                if m:
+                    return m
+        return None
+
     # フォルダ名 → 正規化カードID（manifest があればその card_id を優先）
     dir_by_card: dict[str, str] = {}
     dir_station: dict[str, str] = {}   # 既に地点名になっているフォルダ: dir → card_id
-    for d in existing:
-        m = L.Ledger.read_manifest(os.path.join(season_dir, d))
+    for d in sorted(existing):
+        m = manifest_of(d)
         cid = (m or {}).get("card_id") or d
         norm = normalize_card_id(cid)
         if norm in dir_by_card and dir_by_card[norm] != d:
@@ -92,6 +133,9 @@ def build_plan(root: str, nas_root: str | None, mapping: Mapping, ledger: L.Ledg
         item = PlanItem(action=A_RENAME, card_id=e.card_id, src_dir_name=d or "",
                         dst_dir_name=e.station_folder, warnings=list(e.warnings), entry=e,
                         ingest_id=ing.id if ing else None)
+        if d:
+            item.in_staging = locations[d]["staging"]
+            item.in_nas = locations[d]["nas"]
         if e.errors:
             item.action = A_BLOCKED
             item.reason = "; ".join(e.errors)
@@ -108,8 +152,6 @@ def build_plan(root: str, nas_root: str | None, mapping: Mapping, ledger: L.Ledg
             item.reason = "NASへの転送が終わってから変更します"
         if item.action == A_RENAME:
             used_targets.add(e.station_folder)
-            if nas_root:
-                item.in_nas = os.path.isdir(os.path.join(nas_root, mapping.season_folder, d))
         items.append(item)
 
     mapped_dirs = {i.src_dir_name for i in items if i.src_dir_name}
@@ -117,54 +159,57 @@ def build_plan(root: str, nas_root: str | None, mapping: Mapping, ledger: L.Ledg
         cid = dir_station.get(d, d)
         items.append(PlanItem(action=A_UNMAPPED, card_id=cid, src_dir_name=d, dst_dir_name="",
                               reason="野帳のこの Season に対応する行がありません" if d not in dir_station
-                              else "変更済み（野帳の別行か、以前の変更）"))
-    return RenamePlan(root, nas_root, mapping.season_folder, items, issues)
+                              else "変更済み（野帳の別行か、以前の変更）",
+                              in_staging=locations[d]["staging"], in_nas=locations[d]["nas"]))
+    return plan
+
+
+def _write_manifest_fallback(dst: str, card_id: str, station: str, renamed_from: str) -> None:
+    """台帳に無いフォルダ（旧Rコードで取り込んだもの等）にも manifest だけは残す。"""
+    m = L.Ledger.read_manifest(dst) or {}
+    m.update({"card_id": card_id, "station": station, "renamed_from": renamed_from})
+    try:
+        import json
+        with open(os.path.join(dst, L.MANIFEST_NAME), "w", encoding="utf-8") as f:
+            json.dump(m, f, ensure_ascii=False, indent=1)
+    except OSError:
+        pass
 
 
 def apply_plan(plan: RenamePlan, ledger: L.Ledger | None, log=print) -> tuple[int, list[str]]:
-    """計画のうち action==rename の項目を実行する。戻り値は (成功数, エラー一覧)。"""
+    """計画のうち action==rename の項目を実行する。中継と NAS の両方にあれば両方変える。戻り値は (成功数, エラー一覧)。"""
     done = 0
     errors: list[str] = []
     for it in plan.items:
         if it.action != A_RENAME:
             continue
-        src = os.path.join(plan.season_dir, it.src_dir_name)
-        dst = os.path.join(plan.season_dir, it.dst_dir_name)
-        try:
-            if os.path.exists(dst):
-                raise FileExistsError(dst)
-            os.rename(src, dst)
-        except OSError as e:
-            errors.append(f"{it.src_dir_name} → {it.dst_dir_name}: {e}")
-            continue
-        nas_ok = True
-        if plan.nas_root and it.in_nas:
-            nsrc = os.path.join(plan.nas_root, plan.season_folder, it.src_dir_name)
-            ndst = os.path.join(plan.nas_root, plan.season_folder, it.dst_dir_name)
+        renamed: list[str] = []   # 変更できた場所のフォルダパス
+        targets: list[tuple[str, str]] = []
+        if it.in_staging:
+            targets.append(("中継側", plan.season_dir))
+        if it.in_nas and plan.nas_season_dir:
+            targets.append(("NAS側", plan.nas_season_dir))
+        for label, sdir in targets:
+            src = os.path.join(sdir, it.src_dir_name)
+            dst = os.path.join(sdir, it.dst_dir_name)
             try:
-                if os.path.exists(ndst):
-                    raise FileExistsError(ndst)
-                os.rename(nsrc, ndst)
+                if os.path.exists(dst):
+                    raise FileExistsError(dst)
+                os.rename(src, dst)
+                renamed.append(dst)
             except OSError as e:
-                nas_ok = False
-                errors.append(f"NAS側 {it.src_dir_name} → {it.dst_dir_name}: {e}（中継側は変更済み）")
+                note = "（他方は変更済み）" if renamed else ""
+                errors.append(f"{label} {it.src_dir_name} → {it.dst_dir_name}: {e}{note}")
+        if not renamed:
+            continue
         if ledger and it.ingest_id:
             ledger.update_ingest(it.ingest_id, dir_name=it.dst_dir_name, station=it.dst_dir_name)
-            ledger.write_manifest(it.ingest_id, dst, {"renamed_from": it.src_dir_name})
-            if plan.nas_root and it.in_nas and nas_ok:
-                ledger.write_manifest(it.ingest_id, os.path.join(plan.nas_root, plan.season_folder, it.dst_dir_name),
-                                      {"renamed_from": it.src_dir_name})
+            for dst in renamed:
+                ledger.write_manifest(it.ingest_id, dst, {"renamed_from": it.src_dir_name})
             ledger.event("rename", f"{plan.season_folder}: {it.src_dir_name} → {it.dst_dir_name}", it.card_id)
         else:
-            # 台帳に無いフォルダ（旧Rコードで取り込んだもの等）も manifest だけは残す
-            m = L.Ledger.read_manifest(dst) or {}
-            m.update({"card_id": it.card_id, "station": it.dst_dir_name, "renamed_from": it.src_dir_name})
-            try:
-                import json
-                with open(os.path.join(dst, L.MANIFEST_NAME), "w", encoding="utf-8") as f:
-                    json.dump(m, f, ensure_ascii=False, indent=1)
-            except OSError:
-                pass
-        log(f"{it.src_dir_name} → {it.dst_dir_name}")
+            for dst in renamed:
+                _write_manifest_fallback(dst, it.card_id, it.dst_dir_name, it.src_dir_name)
+        log(f"{it.src_dir_name} → {it.dst_dir_name}（{it.where}）")
         done += 1
     return done, errors

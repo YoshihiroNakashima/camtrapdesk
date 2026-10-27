@@ -108,12 +108,22 @@ class IngestPage(QWidget):
         self.timer.setInterval(500)
         self.timer.timeout.connect(self._refresh_table)
         self.timer.start()
+        self.label_timer = QTimer(self)
+        self.label_timer.setInterval(5000)
+        self.label_timer.timeout.connect(self._refresh_labels)
+        self.label_timer.start()
         self._others_sig: tuple = ()
 
     # ------------------------------------------------------------------ slots
     def _refresh_labels(self) -> None:
         s = self.ctx.settings
-        self.dest_label.setText(s.dest_root or "（未設定。「設定」で保存先を指定してください）")
+        dest = s.dest_root or "（未設定。「設定」で保存先を指定してください）"
+        free = I.free_bytes(s.dest_root) if s.dest_root else None
+        if free is not None:
+            dest += f"　空き {human_size(free)}"
+            if s.nas_root and s.staging_cleanup_after_nas:
+                dest += "（NASで検証済みの分は自動で消して空けます）"
+        self.dest_label.setText(dest)
         self.nas_label.setText(s.nas_root or "（NAS転送なし。保存先が最終保存先になります）")
         if self.season_edit.text() != s.season_folder:
             self.season_edit.setText(s.season_folder)
@@ -320,7 +330,8 @@ class IngestPage(QWidget):
         for r, job in enumerate(jobs):
             st = job.state
             color = {I.S_DONE: COLORS["ok"], I.S_ERROR: COLORS["err"], I.S_SKIPPED: COLORS["muted"],
-                     I.S_COPYING: COLORS["info"], I.S_VERIFYING: COLORS["info"], I.S_REMOVED: COLORS["warn"]}.get(st)
+                     I.S_COPYING: COLORS["info"], I.S_VERIFYING: COLORS["info"], I.S_REMOVED: COLORS["warn"],
+                     I.S_WAITING: COLORS["warn"]}.get(st)
             prog = f"{job.progress*100:.0f}%" if st in (I.S_COPYING, I.S_VERIFYING) else ("100%" if st == I.S_DONE else "")
             spd = job.speed_mbps
             if prog and spd:
@@ -330,7 +341,7 @@ class IngestPage(QWidget):
                     color)
             if st == I.S_DONE:
                 n_done += 1
-            elif st in (I.S_QUEUED, I.S_COPYING, I.S_VERIFYING):
+            elif st in (I.S_QUEUED, I.S_WAITING, I.S_COPYING, I.S_VERIFYING):
                 n_active += 1
             elif st == I.S_ERROR:
                 n_err += 1

@@ -47,15 +47,12 @@ class RenamePage(QWidget):
         h2.addStretch(1)
         form.addRow("対象", h2)
         h3 = QHBoxLayout()
-        self.root_combo = QComboBox()
-        self.root_combo.addItems(["保存先（中継）", "NAS"])
         self.dry_btn = QPushButton("ドライラン（確認）")
         self.dry_btn.clicked.connect(self.dry_run)
         self.apply_btn = QPushButton("変更を実行")
         self.apply_btn.setEnabled(False)
         self.apply_btn.clicked.connect(self.apply)
-        h3.addWidget(QLabel("変更するフォルダの場所"))
-        h3.addWidget(self.root_combo)
+        h3.addWidget(QLabel("保存先（中継）とNASの両方のフォルダを見て、ある方を変更します"))
         h3.addWidget(self.dry_btn)
         h3.addWidget(self.apply_btn)
         h3.addStretch(1)
@@ -63,7 +60,7 @@ class RenamePage(QWidget):
         root.addWidget(box)
 
         split = QSplitter(Qt.Orientation.Vertical)
-        self.table = make_table(["結果", "カードID", "現在のフォルダ", "変更後", "野帳行", "日付", "State", "理由・注意"])
+        self.table = make_table(["結果", "カードID", "現在のフォルダ", "変更後", "場所", "野帳行", "日付", "State", "理由・注意"])
         split.addWidget(self.table)
         self.issues = QPlainTextEdit()
         self.issues.setReadOnly(True)
@@ -131,8 +128,6 @@ class RenamePage(QWidget):
 
     def _root(self) -> tuple[str, str | None]:
         s = self.ctx.settings
-        if self.root_combo.currentIndex() == 1:
-            return s.nas_root, None
         return s.dest_root, (s.nas_root or None)
 
     def dry_run(self) -> None:
@@ -146,7 +141,7 @@ class RenamePage(QWidget):
             QMessageBox.warning(self, "対象", "Type と Season を選んでください。")
             return
         root, nas_root = self._root()
-        if not root:
+        if not root and not nas_root:
             QMessageBox.warning(self, "フォルダ", "変更するフォルダの場所（保存先かNAS）が設定されていません。")
             return
         mapping = build_mapping(self.fieldnote, t, season, self.ctx.settings)
@@ -169,9 +164,9 @@ class RenamePage(QWidget):
             e = it.entry
             note = "; ".join(filter(None, [it.reason] + it.warnings))
             set_row(self.table, r, [R.ACTION_LABELS.get(it.action, it.action), it.card_id, it.src_dir_name,
-                                    it.dst_dir_name, str(e.row_no) if e else "", e.date if e else "",
+                                    it.dst_dir_name, it.where, str(e.row_no) if e else "", e.date if e else "",
                                     e.state if e else "", note], color)
-        lines = [f"シーズンフォルダ: {plan.season_dir}",
+        lines = [f"シーズンフォルダ: {plan.season_dir}" + (f"　／　NAS: {plan.nas_season_dir}" if plan.nas_season_dir else ""),
                  f"変更 {plan.count(R.A_RENAME)} / 保留 {plan.count(R.A_BLOCKED)} / 変更先が既存 {plan.count(R.A_TARGET_EXISTS)}"
                  f" / NAS転送中 {plan.count(R.A_SYNCING)} / フォルダ無し {plan.count(R.A_MISSING)}"
                  f" / 野帳に無い {plan.count(R.A_UNMAPPED)} / 変更済み {plan.count(R.A_ALREADY)}"]

@@ -5,7 +5,9 @@ GUI に依存しない。進捗はコールバックで通知するので、UI �
 
 from __future__ import annotations
 
+import errno
 import os
+import shutil
 import threading
 import time
 import traceback
@@ -22,6 +24,7 @@ from .volumes import Volume, list_volumes
 # ジョブの状態
 S_DETECTED = "detected"      # 検出済み（自動開始オフのとき）
 S_QUEUED = "queued"          # 待機中
+S_WAITING = "waiting"        # 中継の空き待ち
 S_COPYING = "copying"
 S_VERIFYING = "verifying"
 S_DONE = "done"              # 中継先で検証済み（抜いてよい）
@@ -32,6 +35,7 @@ S_REMOVED = "removed"        # 処理中に抜かれた
 STATE_LABELS = {
     S_DETECTED: "検出",
     S_QUEUED: "待機中",
+    S_WAITING: "空き待ち",
     S_COPYING: "コピー中",
     S_VERIFYING: "検証中",
     S_DONE: "完了（抜いてOK）",
@@ -39,6 +43,20 @@ STATE_LABELS = {
     S_ERROR: "エラー",
     S_REMOVED: "抜かれました",
 }
+
+
+SPACE_WAIT_SEC = 10.0   # 中継の空き待ちの再確認間隔
+
+
+def free_bytes(path: str) -> int | None:
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return None
+
+
+def _gb(n: int) -> str:
+    return f"{n/1e9:.1f} GB"
 
 
 @dataclass
@@ -193,7 +211,7 @@ class IngestManager:
             # 抜かれたカード
             for key, job in list(self.jobs.items()):
                 if key not in present:
-                    if job.state in (S_COPYING, S_VERIFYING, S_QUEUED):
+                    if job.state in (S_COPYING, S_VERIFYING, S_QUEUED, S_WAITING):
                         job.state = S_REMOVED
                         job.message = "処理中にカードが抜かれました"
                         self.on_update(job)
@@ -245,7 +263,7 @@ class IngestManager:
         with self._lock:
             if self._batch_counted:
                 return
-            active = [j for j in self.jobs.values() if j.state in (S_QUEUED, S_COPYING, S_VERIFYING)]
+            active = [j for j in self.jobs.values() if j.state in (S_QUEUED, S_WAITING, S_COPYING, S_VERIFYING)]
             if active:
                 return
             self._batch_counted = True
@@ -278,6 +296,36 @@ class IngestManager:
         finally:
             job.finished = time.time()
             self._check_batch_done()
+
+    def _wait_for_space(self, job: CardJob, s: Settings, need_bytes: int) -> bool:
+        """中継の空きが「このカード＋他のコピー中のカードの残り＋余裕」に届くまで待つ。
+        届けばジョブをコピー中にして True。カードが抜かれた・停止されたら False。"""
+        margin = int(max(0.0, float(s.min_free_gb)) * 1e9)
+        waited = False
+        while not self._stop.is_set():
+            free = free_bytes(s.dest_root)
+            with self._lock:
+                if job.state == S_REMOVED or self.jobs.get(job.key) is not job:
+                    return False
+                reserved = sum(max(0, j.total_bytes - j.done_bytes) for j in self.jobs.values()
+                               if j is not job and j.state in (S_COPYING, S_VERIFYING))
+                if free is None or free - reserved >= need_bytes + margin:
+                    job.state = S_COPYING   # ここで予約に数えられるようにする
+                    if waited:
+                        job.message = "空きができたのでコピーを始めます"
+                    break
+                job.state = S_WAITING
+                job.message = (f"中継の空き待ち（空き {_gb(free)}、他のコピーで {_gb(reserved)} 使用予定、"
+                               f"このカード {_gb(need_bytes)}＋余裕 {_gb(margin)}）。NAS転送で空くと再開します")
+            self.on_update(job)
+            if not waited:
+                waited = True
+                self.on_log(f"[{job.card.card_id}] 中継の空きが足りないため待機（空き {_gb(free)}）")
+            self._stop.wait(SPACE_WAIT_SEC)
+        else:
+            return False
+        self.on_update(job)
+        return True
 
     def _ingest_card(self, job: CardJob) -> None:
         s = self.get_settings()
@@ -337,6 +385,13 @@ class IngestManager:
             if clash:
                 self._set(job, S_ERROR, f"保存先に同名ファイルが既にあります（{clash[0]} ほか{len(clash)}件）。上書きしません")
                 return
+        # 中継の空きが足りなければ、NAS転送で空くのを待つ（80枚を一度に挿しても中継SSDが溢れないように）
+        need = card.total_bytes
+        for name, (size_, _h) in existing_hashes.items():
+            if os.path.isfile(os.path.join(dest_dir, name)):
+                need -= size_
+        if not self._wait_for_space(job, s, max(0, need)):
+            return
         os.makedirs(dest_dir, exist_ok=True)
 
         ingest_id = self.ledger.create_ingest(cid, card.card_id_norm, season_folder, dir_name, s.dest_root,
@@ -372,6 +427,8 @@ class IngestManager:
             try:
                 nbytes, h = copy_with_hash(f.src_path, dst, prog)
             except OSError as e:
+                if e.errno == errno.ENOSPC:
+                    raise RuntimeError("中継の空きが無くなりました。空いてから「検出済みをすべて開始」で続きから再開できます") from e
                 raise RuntimeError(f"{f.name} のコピーに失敗: {e}") from e
             if nbytes != f.size:
                 raise RuntimeError(f"{f.name}: サイズ不一致（元 {f.size} / コピー {nbytes}）")

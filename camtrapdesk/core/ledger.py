@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS ingests (
     finished_at TEXT,
     staging_verified_at TEXT,
     nas_verified_at TEXT,
-    cleared_at TEXT
+    cleared_at TEXT,
+    staging_cleared_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_ingests_card ON ingests(card_id_norm);
 CREATE TABLE IF NOT EXISTS files (
@@ -95,6 +96,7 @@ class Ingest:
     staging_verified_at: str | None
     nas_verified_at: str | None
     cleared_at: str | None
+    staging_cleared_at: str | None = None   # NAS検証後に中継のコピーを消した時刻
 
     @property
     def staging_dir(self) -> str:
@@ -127,6 +129,14 @@ class Ledger:
         self._lock = threading.RLock()
         with self._conn() as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
+
+    @staticmethod
+    def _migrate(c: sqlite3.Connection) -> None:
+        """古い台帳に後から増えた列を足す。"""
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(ingests)")}
+        if "staging_cleared_at" not in cols:
+            c.execute("ALTER TABLE ingests ADD COLUMN staging_cleared_at TEXT")
 
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
@@ -205,6 +215,14 @@ class Ledger:
                 " AND nas_verified_at IS NULL AND cleared_at IS NULL ORDER BY id", (STATUS_STAGED,))
             return [self._row_to_ingest(r) for r in rows]
 
+    def synced_with_staging_copy(self) -> list[Ingest]:
+        """NAS で検証済みだが、中継のコピーをまだ消していないもの。"""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM ingests WHERE status = ? AND nas_root IS NOT NULL AND nas_root != ''"
+                " AND staging_cleared_at IS NULL ORDER BY id", (STATUS_SYNCED,))
+            return [self._row_to_ingest(r) for r in rows]
+
     def find_by_dir(self, season_folder: str, dir_name: str) -> Ingest | None:
         with self._conn() as c:
             r = c.execute("SELECT * FROM ingests WHERE season_folder = ? AND dir_name = ?"
@@ -274,6 +292,7 @@ class Ledger:
             "finished_at": ing.finished_at,
             "staging_verified_at": ing.staging_verified_at,
             "nas_verified_at": ing.nas_verified_at,
+            "staging_cleared_at": ing.staging_cleared_at,
             "n_files": len(files),
             "total_bytes": sum(f.size for f in files),
             "files": [{"name": f.name, "size": f.size, "mtime": f.mtime, "hash": f.hash} for f in files],
@@ -328,6 +347,7 @@ class Ledger:
                                    started_at=m.get("started_at"), finished_at=m.get("finished_at"),
                                    staging_verified_at=m.get("staging_verified_at"),
                                    nas_verified_at=m.get("nas_verified_at"),
+                                   staging_cleared_at=m.get("staging_cleared_at"),
                                    message="manifest から再構築")
                 added += 1
         return added

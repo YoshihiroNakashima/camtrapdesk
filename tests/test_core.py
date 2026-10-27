@@ -106,6 +106,9 @@ def test_nas_sync_and_clear(env):
     nas_dir = env["nas"] / "N260710" / "264"
     assert sorted(os.listdir(nas_dir)) == ["IMG_0000.MP4", "IMG_0001.MP4", "manifest.json"]
     assert all(f.nas_ok for f in ledger.files_for(ing.id))
+    # 既定では NAS 検証後に中継のコピーは消える
+    assert ing.staging_cleared_at
+    assert not (env["dest"] / "N260710" / "264").exists()
 
     # 削除判定
     vols = list_volumes(scan_roots=[str(cards)])
@@ -179,6 +182,7 @@ def test_fieldnote_mapping_and_rename(env):
     make_card(cards, "319", n_files=2)
     run_ingest(env)
     (env["dest"] / "N260710" / "UNKNOWN").mkdir()
+    s.staging_cleanup_after_nas = False   # 中継と NAS の両方を変更する経路を確かめる
     plan = build_plan(str(env["dest"]), str(env["nas"]), m, ledger)
     actions = {i.card_id: i.action for i in plan.items}
     # NAS 未転送なので syncing になるはず
@@ -193,6 +197,7 @@ def test_fieldnote_mapping_and_rename(env):
     assert actions["318"] == A_RENAME and actions["295"] == A_RENAME
     assert actions["319"] == A_BLOCKED
     assert actions["UNKNOWN"] == A_UNMAPPED
+    assert {i.card_id: (i.in_staging, i.in_nas) for i in plan.items}["318"] == (True, True)
     n, errs = apply_plan(plan, ledger, log=lambda m: None)
     assert n == 2 and not errs, errs
     assert (env["dest"] / "N260710" / "BSN0592").is_dir()
@@ -304,3 +309,77 @@ def test_assign_id_to_card_without_idtxt(env):
     assert next(iter(mgr.jobs.values())).card.card_id == "6_999"
     # 既に id.txt があるカードには書かない
     assert mgr.assign_card_id(key, "x")[0] is False
+
+
+def test_rename_works_when_only_nas_copy_remains(env):
+    """中継のコピーが（NAS検証後の自動削除で）無くても、NAS 側のフォルダだけ地点名に変えられる。"""
+    s, ledger = env["settings"], env["ledger"]
+    make_card(env["cards"], "318", n_files=2)
+    run_ingest(env)
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    while ledger.pending_nas():
+        syncer._tick()
+    assert not (env["dest"] / "N260710" / "318").exists()
+    fn_path = env["tmp"] / "fn.xlsx"
+    make_fieldnote(fn_path, [{"season": 260710, "station": 592, "ret": 318}])
+    m = build_mapping(load_fieldnote(str(fn_path), s), "N", "260710", s)
+    plan = build_plan(str(env["dest"]), str(env["nas"]), m, ledger)
+    it = {i.card_id: i for i in plan.items}["318"]
+    assert it.action == A_RENAME and (it.in_staging, it.in_nas) == (False, True)
+    n, errs = apply_plan(plan, ledger, log=lambda m: None)
+    assert n == 1 and not errs, errs
+    assert (env["nas"] / "N260710" / "BSN0592").is_dir()
+    assert ledger.latest_ingest_for_card("318").dir_name == "BSN0592"
+    # 削除判定は NAS 側の実体で行う
+    vols = list_volumes(scan_roots=[str(env["cards"])])
+    card = detect_cards(vols, "id.txt", ["DCIM/100_BTCF"], ["mp4"], False, 1024)[0]
+    v = check_card(card, ledger, s)
+    assert v.ok, v.reasons
+    assert v.checked_destination == str(env["nas"] / "N260710" / "BSN0592")
+
+
+def test_leftover_staging_copy_is_cleaned_later(env):
+    """自動削除を後から有効にしても、NAS 検証済みで中継に残っている分は待機中に消される。"""
+    s, ledger = env["settings"], env["ledger"]
+    s.staging_cleanup_after_nas = False
+    make_card(env["cards"], "264", n_files=2)
+    run_ingest(env)
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    while ledger.pending_nas():
+        syncer._tick()
+    assert (env["dest"] / "N260710" / "264").is_dir()
+    s.staging_cleanup_after_nas = True
+    syncer._tick()   # 未転送なし → 残りの掃除
+    assert not (env["dest"] / "N260710" / "264").exists()
+    assert ledger.latest_ingest_for_card("264").staging_cleared_at
+
+
+def test_ingest_waits_for_staging_space(env, monkeypatch):
+    """中継の空きが足りないときはコピーせずに待ち、空いたら続きから始める。"""
+    from camtrapdesk.core import ingest as I
+    monkeypatch.setattr(I, "SPACE_WAIT_SEC", 0.1)
+    free = {"v": 10_000}            # まずは足りない（カードは 2×200KB、余裕は 0）
+    monkeypatch.setattr(I, "free_bytes", lambda path: free["v"])
+    s, ledger = env["settings"], env["ledger"]
+    s.min_free_gb = 0
+    make_card(env["cards"], "264", n_files=2)
+    logs = []
+    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append)
+    mgr.start()
+    mgr.rescan_now()
+    t0 = time.time()
+    while time.time() - t0 < 10:
+        if any(j.state == I.S_WAITING for j in mgr.jobs.values()):
+            break
+        time.sleep(0.05)
+    job = next(iter(mgr.jobs.values()))
+    assert job.state == I.S_WAITING, (job.state, job.message)
+    assert not (env["dest"] / "N260710" / "264").exists()
+    assert mgr.active_count() == 0      # 空き待ちは「取り込み中」に数えない（NAS転送を止めない）
+    free["v"] = 10**12
+    t0 = time.time()
+    while time.time() - t0 < 10 and job.state != S_DONE:
+        time.sleep(0.05)
+    mgr.stop()
+    assert job.state == S_DONE, (job.state, job.message)
+    assert ledger.latest_ingest_for_card("264").status == L.STATUS_STAGED

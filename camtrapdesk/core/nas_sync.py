@@ -31,6 +31,7 @@ class NasSyncer:
         self.current: str | None = None   # 転送中の "season/dir"
         self.last_error: str | None = None
         self.paused = False
+        self._cleanup_skip: set[int] = set()   # 中継の掃除に失敗した取り込み（起動中は再試行しない）
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -66,6 +67,7 @@ class NasSyncer:
             return 5.0
         pending = self.ledger.pending_nas()
         if not pending:
+            self._cleanup_leftovers()
             self.on_status("NAS転送: 待機中（未転送なし）")
             return 15.0
         if self.get_settings().nas_wait_while_ingesting and self.is_ingest_busy and self.is_ingest_busy():
@@ -149,6 +151,65 @@ class NasSyncer:
         self.ledger.write_manifest(ing.id, src_dir)
         self.ledger.event("nas_done", f"{ing.season_folder}/{ing.dir_name} → {dst_dir}", ing.card_id)
         self.on_log(f"[{ing.card_id}] NAS転送・検証完了 → {dst_dir}")
+        if s.staging_cleanup_after_nas and os.path.normcase(os.path.abspath(src_dir)) != os.path.normcase(os.path.abspath(dst_dir)):
+            self._cleanup_staging(ing, src_dir, files)
+
+    def _cleanup_leftovers(self) -> None:
+        """以前に NAS 検証まで済んだのに中継に残っているコピー（消し損ね・設定を後から有効にした分）を消す。"""
+        s = self.get_settings()
+        if not s.staging_cleanup_after_nas:
+            return
+        for ing in self.ledger.synced_with_staging_copy():
+            if self._stop.is_set():
+                return
+            if ing.id in self._cleanup_skip:
+                continue
+            src_dir, dst_dir = ing.staging_dir, ing.nas_dir
+            if not dst_dir or os.path.normcase(os.path.abspath(src_dir)) == os.path.normcase(os.path.abspath(dst_dir)):
+                continue
+            if not os.path.isdir(src_dir):
+                self.ledger.update_ingest(ing.id, staging_cleared_at=L.now_iso())
+                continue
+            # NAS 側に実体があることをサイズで確かめてから消す（台帳だけを信じない）
+            files = [f for f in self.ledger.files_for(ing.id) if not f.deleted_at]
+            if not os.path.isdir(dst_dir):
+                continue
+            ok = all(os.path.isfile(os.path.join(dst_dir, f.name)) and os.path.getsize(os.path.join(dst_dir, f.name)) == f.size
+                     for f in files)
+            if not ok:
+                self._cleanup_skip.add(ing.id)
+                self.on_log(f"[{ing.card_id}] NAS側のファイルが揃っていないため中継のコピーは残します: {dst_dir}")
+                continue
+            if not self._cleanup_staging(ing, src_dir, files):
+                self._cleanup_skip.add(ing.id)
+
+    def _cleanup_staging(self, ing: L.Ingest, src_dir: str, files: list[L.FileRec]) -> bool:
+        """NAS で検証済みになった中継のコピーを消して、中継の空きを戻す。台帳に載っているファイルと manifest だけ消す。"""
+        freed = 0
+        errors = 0
+        for f in files:
+            p = os.path.join(src_dir, f.name)
+            try:
+                if os.path.isfile(p):
+                    freed += os.path.getsize(p)
+                    os.remove(p)
+            except OSError:
+                errors += 1
+        if errors:
+            self.on_log(f"[{ing.card_id}] 中継のコピーを一部消せませんでした（{errors}件）。次回起動時にもう一度試します")
+            return False
+        try:
+            os.remove(os.path.join(src_dir, L.MANIFEST_NAME))
+        except OSError:
+            pass
+        try:
+            os.rmdir(src_dir)   # 台帳に無いファイルが残っていれば消さずに残す
+        except OSError:
+            pass
+        self.ledger.update_ingest(ing.id, staging_cleared_at=L.now_iso())
+        self.ledger.event("staging_cleanup", f"{ing.season_folder}/{ing.dir_name}: {freed/1e9:.2f} GB", ing.card_id)
+        self.on_log(f"[{ing.card_id}] 中継のコピーを削除（{freed/1e9:.2f} GB 空き）")
+        return True
 
     def _prog(self, ing: L.Ingest, frac: float) -> None:
         if self.on_progress:
