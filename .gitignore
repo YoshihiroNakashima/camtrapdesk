@@ -9,3 +9,5 @@ dist/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+.venv/
+camtrapdesk-setup.log
