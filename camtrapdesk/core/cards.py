@@ -49,6 +49,24 @@ def read_card_id(volume: Volume, id_file_name: str) -> str | None:
     return read_card_id_with_reason(volume, id_file_name)[0]
 
 
+def write_card_id(volume: Volume, id_file_name: str, card_id: str) -> tuple[bool, str]:
+    """id.txt を持たないカードに ID を書き込む（カードへ書く唯一の操作）。既にあれば上書きしない。"""
+    card_id = (card_id or "").strip()
+    if not card_id:
+        return False, "IDが空です"
+    if volume.kind == "unreadable":
+        return False, "このボリュームは読み書きできません"
+    p = volume.join(id_file_name)
+    if os.path.exists(p):
+        return False, f"{id_file_name} は既にあります"
+    try:
+        with open(p, "w", encoding="utf-8", newline="\n") as f:
+            f.write(card_id + "\n")
+    except OSError as e:
+        return False, f"書き込めません: {e.strerror or e}"
+    return True, "書き込みました"
+
+
 @dataclass
 class MediaFile:
     src_path: str
@@ -135,6 +153,8 @@ def detect_cards(volumes: list[Volume], id_file_name: str, media_subdirs: list[s
     """id.txt を持つボリュームをカードとして返す。"""
     cards: list[Card] = []
     for v in volumes:
+        if v.kind == "unreadable":
+            continue
         cid = read_card_id(v, id_file_name)
         if not cid:
             continue

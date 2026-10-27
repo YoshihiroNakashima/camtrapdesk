@@ -21,7 +21,8 @@ class Volume:
     root: str         # ファイルアクセスに使うルートパス（末尾に区切り文字を含む）
     display: str      # 画面表示用（例: "F:" / "NO NAME" / フォルダ名）
     label: str        # ボリュームラベル
-    kind: str         # "removable" / "fixed" / "virtual" / "unknown"
+    kind: str         # "removable" / "fixed" / "virtual" / "unknown" / "unreadable"
+    error: str = ""   # kind=="unreadable" のとき、読めない理由
 
     def join(self, *parts: str) -> str:
         return os.path.join(self.root, *parts)
@@ -112,10 +113,15 @@ def _windows_enumerate() -> list[VolumeDiag]:
 def _windows_volumes() -> list[Volume]:
     DRIVE_REMOVABLE, DRIVE_FIXED = 2, 3
     results: list[Volume] = []
+    ERROR_NOT_READY = 21   # メディアが入っていない空のスロット
     for d in _windows_enumerate():
-        if not d.included:
-            continue
         display = d.mounts[0].rstrip("\\") if d.mounts else "(レター無し)"
+        if not d.included:
+            # リムーバブルで、メディアはあるのに情報が取れない（破損・未フォーマット等）ものは「読めない」として返す
+            if d.drive_type == DRIVE_REMOVABLE and not d.info_ok and d.error != ERROR_NOT_READY:
+                results.append(Volume(key=d.guid, root=d.mounts[0] if d.mounts else d.guid, display=display,
+                                      label=d.label, kind="unreadable", error=d.reason))
+            continue
         kind = "removable" if d.drive_type == DRIVE_REMOVABLE else ("fixed" if d.drive_type == DRIVE_FIXED else "unknown")
         # アクセスはレターがあればレター経由（エクスプローラーと同じ見え方）、無ければGUIDパス
         root = d.mounts[0] if d.mounts else d.guid

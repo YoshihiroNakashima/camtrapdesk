@@ -52,10 +52,13 @@ class IngestPage(QWidget):
         self.rescan_btn.clicked.connect(lambda: self.ctx.ingest.rescan_now())
         self.clear_btn = QPushButton("完了分を一覧から消す")
         self.clear_btn.clicked.connect(self._clear_done)
+        self.assign_btn = QPushButton("IDの無いカードにIDを付ける…")
+        self.assign_btn.setToolTip("id.txt が無いカードに ID を書き込みます（カードへの唯一の書き込み）")
+        self.assign_btn.clicked.connect(self._assign_ids)
         self.diag_btn = QPushButton("診断")
         self.diag_btn.setToolTip("Windows が認識している全ボリュームと id.txt の状態を一覧にします")
         self.diag_btn.clicked.connect(self._diagnostics)
-        for w in (self.auto_chk, self.pause_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.diag_btn):
+        for w in (self.auto_chk, self.pause_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.assign_btn, self.diag_btn):
             ops.addWidget(w)
         ops.addStretch(1)
         self.summary_label = QLabel("")
@@ -101,6 +104,7 @@ class IngestPage(QWidget):
         self.timer.setInterval(500)
         self.timer.timeout.connect(self._refresh_table)
         self.timer.start()
+        self._others_sig: tuple = ()
 
     # ------------------------------------------------------------------ slots
     def _refresh_labels(self) -> None:
@@ -156,6 +160,49 @@ class IngestPage(QWidget):
     def _on_job_updated(self, job) -> None:
         self._dirty = True
 
+    def _assign_ids(self) -> None:
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView
+        self.ctx.ingest.rescan_now()
+        others = [(k, v, r) for k, (v, r) in self.ctx.ingest.others.items() if v.kind != "unreadable"]
+        if not others:
+            QMessageBox.information(self, "IDの付与", "id.txt の無いカードは挿さっていません。")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("IDの無いカードにIDを付ける")
+        dlg.resize(700, 320)
+        lay = QVBoxLayout(dlg)
+        info = QLabel("カードに貼ってある番号などを入力してください（例: 6_650）。空欄のカードには何もしません。"
+                      "\n入力した ID は、そのカードの直下に id.txt として書き込まれます。")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        tbl = QTableWidget(len(others), 4)
+        tbl.setHorizontalHeaderLabels(["ボリューム", "ラベル", "状態", "付けるID（入力）"])
+        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        for i, (k, v, r) in enumerate(others):
+            for c, val in enumerate([v.display, v.label, r]):
+                it = QTableWidgetItem(val)
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                tbl.setItem(i, c, it)
+            tbl.setItem(i, 3, QTableWidgetItem(""))
+        lay.addWidget(tbl)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        results = []
+        for i, (k, v, r) in enumerate(others):
+            it = tbl.item(i, 3)
+            cid = it.text().strip() if it else ""
+            if not cid:
+                continue
+            ok, msg = self.ctx.ingest.assign_card_id(k, cid)
+            results.append(f"{v.display}: {cid} → {msg}")
+        if results:
+            QMessageBox.information(self, "IDの付与", "\n".join(results))
+        self.ctx.ingest.rescan_now()
+
     def _diagnostics(self) -> None:
         from ...core.volumes import diagnostics
         from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout
@@ -204,11 +251,16 @@ class IngestPage(QWidget):
 
     # ----------------------------------------------------------------- table
     def _refresh_table(self) -> None:
+        sig = tuple(sorted(self.ctx.ingest.others))
+        if sig != self._others_sig:
+            self._others_sig = sig
+            self._dirty = True
         if not self._dirty:
             return
         self._dirty = False
         jobs = sorted(self.ctx.ingest.jobs.values(), key=lambda j: (j.card.volume.display, j.card.card_id))
-        self.table.setRowCount(len(jobs))
+        others = sorted(self.ctx.ingest.others.values(), key=lambda o: o[0].display)
+        self.table.setRowCount(len(jobs) + len(others))
         n_done = n_active = n_err = 0
         for r, job in enumerate(jobs):
             st = job.state
@@ -224,4 +276,19 @@ class IngestPage(QWidget):
                 n_active += 1
             elif st == I.S_ERROR:
                 n_err += 1
-        self.summary_label.setText(f"検出 {len(jobs)} 枚 / 処理中 {n_active} / 完了 {n_done} / エラー {n_err}")
+        n_noid = n_unread = 0
+        for i, (v, reason) in enumerate(others):
+            r = len(jobs) + i
+            if v.kind == "unreadable":
+                state, color = "読めません", COLORS["err"]
+                n_unread += 1
+            else:
+                state, color = "IDなし", COLORS["warn"]
+                n_noid += 1
+            set_row(self.table, r, [v.display, "", "", "", state, "", f"{v.label}: {reason}"], color)
+        extra = ""
+        if n_noid:
+            extra += f" / IDなし {n_noid}"
+        if n_unread:
+            extra += f" / 読めません {n_unread}"
+        self.summary_label.setText(f"検出 {len(jobs)} 枚 / 処理中 {n_active} / 完了 {n_done} / エラー {n_err}{extra}")

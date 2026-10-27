@@ -15,9 +15,9 @@ from typing import Callable
 
 from ..config import Settings
 from . import ledger as L
-from .cards import Card, detect_cards, read_card_id_with_reason
+from .cards import Card, detect_cards, read_card_id_with_reason, write_card_id
 from .hashing import copy_with_hash, hash_file
-from .volumes import list_volumes
+from .volumes import Volume, list_volumes
 
 # ジョブの状態
 S_DETECTED = "detected"      # 検出済み（自動開始オフのとき）
@@ -79,6 +79,7 @@ class IngestManager:
         self._batch_counted = True
         self.paused = False
         self._skipped_reported: set[str] = set()   # id.txt が無い等で対象外にしたボリューム（1回だけ記録）
+        self.others: dict[str, tuple[Volume, str]] = {}   # カードとして扱えないリムーバブルボリュームと理由
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -113,6 +114,22 @@ class IngestManager:
         if self._pool:
             self._pool.submit(self._run_job, key)
 
+    def assign_card_id(self, key: str, card_id: str) -> tuple[bool, str]:
+        """id.txt の無いカードに ID を書き込み、次のスキャンで取り込めるようにする。"""
+        with self._lock:
+            item = self.others.get(key)
+        if not item:
+            return False, "対象のボリュームが見つかりません"
+        v, _reason = item
+        ok, msg = write_card_id(v, self.get_settings().id_file_name, card_id)
+        if ok:
+            self.ledger.event("assign_id", f"{v.display} ({v.label}) に ID {card_id.strip()} を書き込み", card_id.strip())
+            self.on_log(f"ボリューム {v.display} に {self.get_settings().id_file_name} = {card_id.strip()} を書き込みました")
+            with self._lock:
+                self.others.pop(key, None)
+                self._skipped_reported.discard(key)
+        return ok, msg
+
     def remove_job(self, key: str) -> None:
         with self._lock:
             self.jobs.pop(key, None)
@@ -136,15 +153,23 @@ class IngestManager:
         cards = detect_cards(vols, s.id_file_name, s.media_subdirs, s.media_extensions,
                              s.media_recursive, s.min_file_size_bytes, list_files=True)
         present = {c.volume.key for c in cards}
-        # カードとして扱えなかったリムーバブルボリュームを、理由付きで1回だけログに出す
+        # カードとして扱えなかったリムーバブルボリュームは、理由付きで一覧に出し、ログにも1回だけ書く
+        others: dict[str, tuple[Volume, str]] = {}
         for v in vols:
-            if v.key in present or v.kind not in ("removable", "virtual"):
+            if v.key in present:
                 continue
-            if v.key in self._skipped_reported:
+            if v.kind == "unreadable":
+                reason = f"Windows が読み取れません（{v.error}）。別のスロットに挿し直すか、カードの破損・未フォーマットを疑ってください"
+            elif v.kind in ("removable", "virtual"):
+                _cid, reason = read_card_id_with_reason(v, s.id_file_name)
+            else:
                 continue
-            _cid, reason = read_card_id_with_reason(v, s.id_file_name)
-            self._skipped_reported.add(v.key)
-            self.on_log(f"ボリューム {v.display}（{v.label or 'ラベル無し'}）は対象外: {reason}")
+            others[v.key] = (v, reason)
+            if v.key not in self._skipped_reported:
+                self._skipped_reported.add(v.key)
+                self.on_log(f"ボリューム {v.display}（{v.label or 'ラベル無し'}）は対象外: {reason}")
+        with self._lock:
+            self.others = others
         self._skipped_reported &= {v.key for v in vols}
         new_jobs: list[CardJob] = []
         with self._lock:

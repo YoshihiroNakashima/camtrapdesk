@@ -274,3 +274,24 @@ def test_interrupted_ingest_resumes(env):
     new = ledger.latest_ingest_for_card("100")
     assert new.id != ing.id and new.status == L.STATUS_STAGED
     assert ledger.get_ingest(ing.id).status == L.STATUS_ERROR
+
+
+def test_assign_id_to_card_without_idtxt(env):
+    """id.txt の無いカードは一覧（others）に出て、ID を付けると取り込める。"""
+    s, ledger = env["settings"], env["ledger"]
+    root, _ = make_card(env["cards"], "999", n_files=1)
+    os.remove(os.path.join(root, "id.txt"))
+    logs = []
+    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append)
+    mgr._scan_once()
+    assert not mgr.jobs and len(mgr.others) == 1
+    key, (vol, reason) = next(iter(mgr.others.items()))
+    assert "id.txt がありません" in reason
+    ok, msg = mgr.assign_card_id(key, "6_999")
+    assert ok, msg
+    assert open(os.path.join(root, "id.txt"), encoding="utf-8").read() == "6_999\n"
+    mgr._scan_once()
+    assert not mgr.others and len(mgr.jobs) == 1
+    assert next(iter(mgr.jobs.values())).card.card_id == "6_999"
+    # 既に id.txt があるカードには書かない
+    assert mgr.assign_card_id(key, "x")[0] is False
