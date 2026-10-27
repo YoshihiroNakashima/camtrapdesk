@@ -7,7 +7,7 @@ name = "camtrapdesk"
 version = "0.1.0"
 description = "カメラトラップのSDカード取り込み・NAS転送・地点名変更・削除をGUIで行うデスクトップアプリ"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Yoshihiro Nakashima" }]
 dependencies = [
