@@ -76,6 +76,7 @@ class Settings:
     scan_roots: list[str] = field(default_factory=list)   # 追加の検索ルート（テスト・Linux用）
     exclude_volumes: list[str] = field(default_factory=list)
     volume_label_prefix: str = "BRW_"
+    slot_names: dict[str, str] = field(default_factory=dict)   # ボリューム識別子（リーダーのスロット）→ 人が付けた名前
 
     # ------------------------------------------------------------------
     def rule_for(self, type_code: str) -> TypeRule:

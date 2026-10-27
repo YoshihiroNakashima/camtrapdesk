@@ -45,6 +45,17 @@ class AppContext(QObject):
     def get_settings(self) -> Settings:
         return self.settings
 
+    def slot_label(self, volume) -> str:
+        """スロットに名前が付いていれば「名前 (K:)」、無ければドライブ表示だけ。"""
+        name = self.settings.slot_names.get(volume.key)
+        return f"{name} ({volume.display})" if name else volume.display
+
+    def slot_sort_key(self, volume) -> tuple:
+        import re
+        name = self.settings.slot_names.get(volume.key, "")
+        parts = [(0, int(x)) if x.isdigit() else (1, x.lower()) for x in re.split(r"(\d+)", name) if x]
+        return (0 if name else 1, parts, volume.display)
+
     def save(self) -> None:
         save_settings(self.settings)
         self._apply_match_mode()

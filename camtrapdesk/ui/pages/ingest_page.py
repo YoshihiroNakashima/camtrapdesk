@@ -55,10 +55,14 @@ class IngestPage(QWidget):
         self.assign_btn = QPushButton("IDの無いカードにIDを付ける…")
         self.assign_btn.setToolTip("id.txt が無いカードに ID を書き込みます（カードへの唯一の書き込み）")
         self.assign_btn.clicked.connect(self._assign_ids)
+        self.slots_btn = QPushButton("スロットに名前を付ける…")
+        self.slots_btn.setToolTip("リーダーの差し口ごとに名前（例: 1-A）を付けると、ドライブ文字が変わっても同じ名前で表示されます")
+        self.slots_btn.clicked.connect(self._name_slots)
         self.diag_btn = QPushButton("診断")
         self.diag_btn.setToolTip("Windows が認識している全ボリュームと id.txt の状態を一覧にします")
         self.diag_btn.clicked.connect(self._diagnostics)
-        for w in (self.auto_chk, self.pause_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.assign_btn, self.diag_btn):
+        for w in (self.auto_chk, self.pause_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.assign_btn,
+                  self.slots_btn, self.diag_btn):
             ops.addWidget(w)
         ops.addStretch(1)
         self.summary_label = QLabel("")
@@ -67,7 +71,7 @@ class IngestPage(QWidget):
 
         # --- 表とログ ---
         split = QSplitter(Qt.Orientation.Vertical)
-        self.table = make_table(["ボリューム", "カードID", "ファイル数", "容量", "状態", "進捗", "メッセージ"])
+        self.table = make_table(["スロット", "カードID", "ファイル数", "容量", "状態", "進捗", "メッセージ"])
         split.addWidget(self.table)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -203,6 +207,57 @@ class IngestPage(QWidget):
             QMessageBox.information(self, "IDの付与", "\n".join(results))
         self.ctx.ingest.rescan_now()
 
+    def _name_slots(self) -> None:
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView
+        self.ctx.ingest.rescan_now()
+        vols = []
+        for j in self.ctx.ingest.jobs.values():
+            vols.append((j.card.volume, j.card.card_id))
+        for v, _r in self.ctx.ingest.others.values():
+            vols.append((v, ""))
+        if not vols:
+            QMessageBox.information(self, "スロットの名前", "カードが挿さっているスロットがありません。")
+            return
+        vols.sort(key=lambda t: self.ctx.slot_sort_key(t[0]))
+        dlg = QDialog(self)
+        dlg.setWindowTitle("スロットに名前を付ける")
+        dlg.resize(760, 420)
+        lay = QVBoxLayout(dlg)
+        info = QLabel("いま挿さっているカードについて、そのカードが入っている差し口の名前を入力してください（例: 1-A、1-B、…）。"
+                      "カードIDを手がかりに、どのリーダーのどのスロットかを確認して付けます。"
+                      "\n名前はスロット（リーダーの差し口）に残り、カードを入れ替えても、ドライブ文字が変わっても同じ名前で表示されます。"
+                      "リーダーを別のUSBポートに挿し替えると付け直しが必要です。")
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        tbl = QTableWidget(len(vols), 4)
+        tbl.setHorizontalHeaderLabels(["ドライブ", "カードID", "現在の名前", "スロット名（入力）"])
+        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        for i, (v, cid) in enumerate(vols):
+            cur = self.ctx.settings.slot_names.get(v.key, "")
+            for c, val in enumerate([v.display, cid, cur]):
+                it = QTableWidgetItem(val)
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                tbl.setItem(i, c, it)
+            tbl.setItem(i, 3, QTableWidgetItem(cur))
+        lay.addWidget(tbl)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        lay.addWidget(btns)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        names = dict(self.ctx.settings.slot_names)
+        for i, (v, _cid) in enumerate(vols):
+            it = tbl.item(i, 3)
+            val = it.text().strip() if it else ""
+            if val:
+                names[v.key] = val
+            else:
+                names.pop(v.key, None)
+        self.ctx.settings.slot_names = names
+        self.ctx.save()
+        self._dirty = True
+
     def _diagnostics(self) -> None:
         from ...core.volumes import diagnostics
         from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout
@@ -258,8 +313,8 @@ class IngestPage(QWidget):
         if not self._dirty:
             return
         self._dirty = False
-        jobs = sorted(self.ctx.ingest.jobs.values(), key=lambda j: (j.card.volume.display, j.card.card_id))
-        others = sorted(self.ctx.ingest.others.values(), key=lambda o: o[0].display)
+        jobs = sorted(self.ctx.ingest.jobs.values(), key=lambda j: self.ctx.slot_sort_key(j.card.volume))
+        others = sorted(self.ctx.ingest.others.values(), key=lambda o: self.ctx.slot_sort_key(o[0]))
         self.table.setRowCount(len(jobs) + len(others))
         n_done = n_active = n_err = 0
         for r, job in enumerate(jobs):
@@ -267,7 +322,7 @@ class IngestPage(QWidget):
             color = {I.S_DONE: COLORS["ok"], I.S_ERROR: COLORS["err"], I.S_SKIPPED: COLORS["muted"],
                      I.S_COPYING: COLORS["info"], I.S_VERIFYING: COLORS["info"], I.S_REMOVED: COLORS["warn"]}.get(st)
             prog = f"{job.progress*100:.0f}%" if st in (I.S_COPYING, I.S_VERIFYING) else ("100%" if st == I.S_DONE else "")
-            set_row(self.table, r, [job.card.volume.display, job.card.card_id, str(job.card.n_files),
+            set_row(self.table, r, [self.ctx.slot_label(job.card.volume), job.card.card_id, str(job.card.n_files),
                                     human_size(job.card.total_bytes), I.STATE_LABELS.get(st, st), prog, job.message],
                     color)
             if st == I.S_DONE:
@@ -285,7 +340,7 @@ class IngestPage(QWidget):
             else:
                 state, color = "IDなし", COLORS["warn"]
                 n_noid += 1
-            set_row(self.table, r, [v.display, "", "", "", state, "", f"{v.label}: {reason}"], color)
+            set_row(self.table, r, [self.ctx.slot_label(v), "", "", "", state, "", f"{v.label}: {reason}"], color)
         extra = ""
         if n_noid:
             extra += f" / IDなし {n_noid}"

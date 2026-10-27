@@ -38,7 +38,7 @@ class ClearPage(QWidget):
         root.addLayout(ops)
 
         split = QSplitter(Qt.Orientation.Vertical)
-        self.table = make_table(["ボリューム", "カードID", "判定", "取り込み先", "削除対象", "容量", "残す", "理由・注意"])
+        self.table = make_table(["スロット", "カードID", "判定", "取り込み先", "削除対象", "容量", "残す", "理由・注意"])
         split.addWidget(self.table)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -51,6 +51,7 @@ class ClearPage(QWidget):
         exclude = list(s.exclude_volumes) + [p for p in (s.dest_root, s.nas_root) if p]
         vols = list_volumes(s.scan_roots, exclude)
         cards = detect_cards(vols, s.id_file_name, s.media_subdirs, s.media_extensions, s.media_recursive, 0)
+        cards.sort(key=lambda c: self.ctx.slot_sort_key(c.volume))
         self.verdicts = [check_card(c, self.ctx.ledger, s, verify_hash=self.hash_chk.isChecked(),
                                     allow_offline_destination=self.offline_chk.isChecked()) for c in cards]
         self.table.setRowCount(len(self.verdicts))
@@ -58,7 +59,7 @@ class ClearPage(QWidget):
         for r, v in enumerate(self.verdicts):
             ing = v.ingest
             where = f"{ing.season_folder}/{ing.dir_name}" if ing else ""
-            set_row(self.table, r, [v.card.volume.display, v.card.card_id, "削除OK" if v.ok else "削除しない", where,
+            set_row(self.table, r, [self.ctx.slot_label(v.card.volume), v.card.card_id, "削除OK" if v.ok else "削除しない", where,
                                     str(len(v.deletable)), human_size(v.deletable_bytes), str(len(v.extra)),
                                     "; ".join(v.reasons)], COLORS["ok"] if v.ok else COLORS["err"])
             n_ok += 1 if v.ok else 0

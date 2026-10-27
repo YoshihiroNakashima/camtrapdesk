@@ -33,7 +33,7 @@ class VolumePage(QWidget):
         ops.addWidget(self.apply_btn)
         ops.addStretch(1)
         root.addLayout(ops)
-        self.table = make_table(["ボリューム", "現在の名前", "カードID", "変更後", "結果"])
+        self.table = make_table(["スロット", "現在の名前", "カードID", "変更後", "結果"])
         root.addWidget(self.table, 1)
 
     def scan(self) -> None:
@@ -45,7 +45,7 @@ class VolumePage(QWidget):
         for r, c in enumerate(self.cards):
             new = proposed_label(pre, c.card_id)
             note = "11文字を超えます" if label_too_long(new) else ("変更済み" if c.volume.label == new else "")
-            set_row(self.table, r, [c.volume.display, c.volume.label, c.card_id, new, note],
+            set_row(self.table, r, [self.ctx.slot_label(c.volume), c.volume.label, c.card_id, new, note],
                     COLORS["muted"] if note else None)
 
     def apply(self) -> None:
@@ -67,5 +67,5 @@ class VolumePage(QWidget):
             if c.volume.label == new:
                 continue
             ok, msg = set_volume_label(c.volume, new)
-            set_row(self.table, r, [c.volume.display, c.volume.label, c.card_id, new, msg],
+            set_row(self.table, r, [self.ctx.slot_label(c.volume), c.volume.label, c.card_id, new, msg],
                     COLORS["ok"] if ok else COLORS["err"])
