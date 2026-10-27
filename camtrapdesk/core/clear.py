@@ -9,6 +9,7 @@ from ..config import Settings
 from . import ledger as L
 from .cards import Card
 from .hashing import hash_file
+from .roots import resolve_staging_dir
 
 
 @dataclass
@@ -73,7 +74,10 @@ def check_card(card: Card, ledger: L.Ledger, s: Settings, verify_hash: bool = Fa
         v.reasons.append(f"台帳に無いファイルが{len(v.extra)}件あります（削除しません）")
 
     # 最終保存先（NASがあればNAS、無ければ中継先）に実体があるか
-    dest_dir = ing.nas_dir if (ing.nas_root and ing.status == L.STATUS_SYNCED) else ing.staging_dir
+    if ing.nas_root and ing.status == L.STATUS_SYNCED:
+        dest_dir = ing.nas_dir or ""
+    else:
+        dest_dir = resolve_staging_dir(ing, s, ledger) or ing.staging_dir
     v.checked_destination = dest_dir
     if os.path.isdir(dest_dir):
         missing = []

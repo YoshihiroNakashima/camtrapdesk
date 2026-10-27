@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS ingests (
     staging_verified_at TEXT,
     nas_verified_at TEXT,
     cleared_at TEXT,
-    staging_cleared_at TEXT
+    staging_cleared_at TEXT,
+    dest_root_id TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_ingests_card ON ingests(card_id_norm);
 CREATE TABLE IF NOT EXISTS files (
@@ -97,6 +98,7 @@ class Ingest:
     nas_verified_at: str | None
     cleared_at: str | None
     staging_cleared_at: str | None = None   # NAS検証後に中継のコピーを消した時刻
+    dest_root_id: str | None = None         # 中継先フォルダの目印ID（ドライブ文字が変わっても探せる）
 
     @property
     def staging_dir(self) -> str:
@@ -137,6 +139,8 @@ class Ledger:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(ingests)")}
         if "staging_cleared_at" not in cols:
             c.execute("ALTER TABLE ingests ADD COLUMN staging_cleared_at TEXT")
+        if "dest_root_id" not in cols:
+            c.execute("ALTER TABLE ingests ADD COLUMN dest_root_id TEXT")
 
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
@@ -161,14 +165,14 @@ class Ledger:
 
     def create_ingest(self, card_id: str, card_id_norm: str, season_folder: str, dir_name: str,
                       dest_root: str, nas_root: str | None, source_volume: str, source_label: str,
-                      n_files: int, total_bytes: int) -> int:
+                      n_files: int, total_bytes: int, dest_root_id: str | None = None) -> int:
         with self._lock, self._conn() as c:
             cur = c.execute(
                 "INSERT INTO ingests(card_id, card_id_norm, season_folder, dir_name, dest_root, nas_root,"
-                " source_volume, source_label, status, n_files, total_bytes, started_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                " source_volume, source_label, status, n_files, total_bytes, started_at, dest_root_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (card_id, card_id_norm, season_folder, dir_name, dest_root, nas_root or None,
-                 source_volume, source_label, STATUS_COPYING, n_files, total_bytes, now_iso()))
+                 source_volume, source_label, STATUS_COPYING, n_files, total_bytes, now_iso(), dest_root_id))
             return int(cur.lastrowid)
 
     def update_ingest(self, ingest_id: int, **fields: Any) -> None:
@@ -222,6 +226,12 @@ class Ledger:
                 "SELECT * FROM ingests WHERE status = ? AND nas_root IS NOT NULL AND nas_root != ''"
                 " AND staging_cleared_at IS NULL ORDER BY id", (STATUS_SYNCED,))
             return [self._row_to_ingest(r) for r in rows]
+
+    def known_dest_roots(self) -> list[tuple[str, str | None]]:
+        """台帳に出てくる中継先（パス, 目印ID）の一覧。"""
+        with self._conn() as c:
+            rows = c.execute("SELECT dest_root, dest_root_id FROM ingests GROUP BY dest_root, dest_root_id ORDER BY MAX(id) DESC")
+            return [(r["dest_root"], r["dest_root_id"]) for r in rows]
 
     def find_by_dir(self, season_folder: str, dir_name: str) -> Ingest | None:
         with self._conn() as c:
@@ -293,6 +303,7 @@ class Ledger:
             "staging_verified_at": ing.staging_verified_at,
             "nas_verified_at": ing.nas_verified_at,
             "staging_cleared_at": ing.staging_cleared_at,
+            "dest_root_id": ing.dest_root_id,
             "n_files": len(files),
             "total_bytes": sum(f.size for f in files),
             "files": [{"name": f.name, "size": f.size, "mtime": f.mtime, "hash": f.hash} for f in files],

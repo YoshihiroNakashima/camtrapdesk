@@ -12,6 +12,7 @@ from typing import Callable
 from ..config import Settings
 from . import ledger as L
 from .hashing import copy_with_hash, hash_file
+from .roots import resolve_staging_dir
 
 
 class NasSyncer:
@@ -73,25 +74,34 @@ class NasSyncer:
         if self.get_settings().nas_wait_while_ingesting and self.is_ingest_busy and self.is_ingest_busy():
             self.on_status(f"NAS転送: カードの取り込み中のため待機（{len(pending)}件）。取り込みが終わると再開します")
             return 5.0
-        ing = pending[0]
+        s = self.get_settings()
+        # 中継先が今つながっているもの（SSD を抜いている間はその分を飛ばして待つ）
+        ready: list[tuple[L.Ingest, str]] = []
+        for ing in pending:
+            src = resolve_staging_dir(ing, s, self.ledger)
+            if src and os.path.isdir(src):
+                ready.append((ing, src))
+        if not ready:
+            self.on_status(f"NAS転送: 中継先が見つかりません（SSDを取り外し中？）。{len(pending)}件待機。接続されると再開します")
+            return 30.0
+        ing, src_dir = ready[0]
         nas_root = ing.nas_root or ""
         if not nas_root or not os.path.isdir(nas_root):
             self.on_status(f"NAS転送: NASに接続できません（{nas_root}）。{len(pending)}件待機。30秒後に再試行")
             return 30.0
         self.current = f"{ing.season_folder}/{ing.dir_name}"
         self.on_status(f"NAS転送: {self.current} を転送中（残り{len(pending)}件）")
-        self._sync_one(ing)
+        self._sync_one(ing, src_dir)
         self.current = None
         return 0.5   # 続けて次へ
 
-    def _sync_one(self, ing: L.Ingest) -> None:
+    def _sync_one(self, ing: L.Ingest, src_dir: str | None = None) -> None:
         s = self.get_settings()
-        src_dir = ing.staging_dir
+        src_dir = src_dir or resolve_staging_dir(ing, s, self.ledger)
         dst_dir = ing.nas_dir
         assert dst_dir
-        if not os.path.isdir(src_dir):
-            self.ledger.update_ingest(ing.id, status=L.STATUS_ERROR, message=f"中継先フォルダが見つかりません: {src_dir}")
-            self.on_log(f"[{ing.card_id}] 中継先フォルダが見つかりません: {src_dir}")
+        if not src_dir or not os.path.isdir(src_dir):
+            self.on_log(f"[{ing.card_id}] 中継先フォルダが見つかりません（取り外し中？）。接続されたら転送します: {ing.staging_dir}")
             return
         files = [f for f in self.ledger.files_for(ing.id) if not f.deleted_at]
         total = sum(f.size for f in files) or 1
@@ -103,8 +113,8 @@ class NasSyncer:
             src = os.path.join(src_dir, f.name)
             dst = os.path.join(dst_dir, f.name)
             if not os.path.isfile(src):
-                self.ledger.update_ingest(ing.id, status=L.STATUS_ERROR, message=f"中継先にファイルがありません: {f.name}")
-                self.on_log(f"[{ing.card_id}] 中継先にファイルがありません: {f.name}")
+                self.ledger.update_ingest(ing.id, status=L.STATUS_ERROR, message=f"中継先にファイルがありません: {f.name}（{src_dir}）")
+                self.on_log(f"[{ing.card_id}] 中継先にファイルがありません: {f.name}（{src_dir}）")
                 return
             # 既に NAS にあり、サイズとハッシュが一致すればコピーしない（再開）
             if f.nas_ok and os.path.isfile(dst) and os.path.getsize(dst) == f.size:
@@ -164,9 +174,9 @@ class NasSyncer:
                 return
             if ing.id in self._cleanup_skip:
                 continue
-            src_dir, dst_dir = ing.staging_dir, ing.nas_dir
-            if not dst_dir or os.path.normcase(os.path.abspath(src_dir)) == os.path.normcase(os.path.abspath(dst_dir)):
-                continue
+            src_dir, dst_dir = resolve_staging_dir(ing, s, self.ledger, search=False), ing.nas_dir
+            if not src_dir or not dst_dir or os.path.normcase(os.path.abspath(src_dir)) == os.path.normcase(os.path.abspath(dst_dir)):
+                continue   # 中継先が今つながっていなければ、つながったときに消す
             if not os.path.isdir(src_dir):
                 self.ledger.update_ingest(ing.id, staging_cleared_at=L.now_iso())
                 continue

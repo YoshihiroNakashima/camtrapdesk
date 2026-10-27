@@ -19,6 +19,7 @@ from ..config import Settings
 from . import ledger as L
 from .cards import Card, detect_cards, read_card_id_with_reason, write_card_id
 from .hashing import copy_with_hash, hash_file
+from .roots import ensure_root_id, resolve_staging_dir
 from .volumes import Volume, list_volumes
 
 # ジョブの状態
@@ -46,6 +47,10 @@ STATE_LABELS = {
 
 
 SPACE_WAIT_SEC = 10.0   # 中継の空き待ちの再確認間隔
+
+
+class NoSpaceError(RuntimeError):
+    """コピー中に中継がいっぱいになった（待って続きから再開する）。"""
 
 
 def free_bytes(path: str) -> int | None:
@@ -286,7 +291,28 @@ class IngestManager:
         if not job or job.state != S_QUEUED:
             return
         try:
-            self._ingest_card(job)
+            while True:
+                try:
+                    self._ingest_card(job)
+                    break
+                except NoSpaceError as e:
+                    # 中継がいっぱい: 記録を中断扱いにして待ち、空いたら（または中継先が変わったら）続きから
+                    if job.ingest_id:
+                        self.ledger.update_ingest(job.ingest_id, status=L.STATUS_ERROR, message=str(e),
+                                                  finished_at=L.now_iso())
+                    self.ledger.event("no_space", f"{job.card.card_id}: {e}", job.card.card_id)
+                    self.on_log(f"[{job.card.card_id}] {e}。NAS転送で空くか、「設定」で別のSSDを中継先にすると続きから再開します")
+                    job.ingest_id = None
+                    job.done_bytes = 0
+                    job.done_files = 0
+                    job.copy_started = None
+                    self._set(job, S_WAITING, f"{e}。空くか中継先が変わるのを待っています")
+                    self._stop.wait(SPACE_WAIT_SEC)
+                    if self._stop.is_set():
+                        return
+                    with self._lock:
+                        if self.jobs.get(key) is not job or job.state != S_WAITING:
+                            return
         except Exception as e:
             self.ledger.event("error", f"{job.card.card_id}: {e}", job.card.card_id)
             if job.ingest_id:
@@ -309,18 +335,24 @@ class IngestManager:
                     return False
                 reserved = sum(max(0, j.total_bytes - j.done_bytes) for j in self.jobs.values()
                                if j is not job and j.state in (S_COPYING, S_VERIFYING))
-                if free is None or free - reserved >= need_bytes + margin:
+                if free is not None and free - reserved >= need_bytes + margin:
                     job.state = S_COPYING   # ここで予約に数えられるようにする
                     if waited:
-                        job.message = "空きができたのでコピーを始めます"
+                        job.message = "中継に空きができたのでコピーを始めます"
                     break
                 job.state = S_WAITING
-                job.message = (f"中継の空き待ち（空き {_gb(free)}、他のコピーで {_gb(reserved)} 使用予定、"
-                               f"このカード {_gb(need_bytes)}＋余裕 {_gb(margin)}）。NAS転送で空くと再開します")
+                if free is None:
+                    job.message = (f"中継先 {s.dest_root} が見つかりません（取り外し中？）。"
+                                   "接続し直すか、「設定」で別の中継先を指定すると再開します")
+                else:
+                    job.message = (f"中継の空き待ち（空き {_gb(free)}、他のコピーで {_gb(reserved)} 使用予定、"
+                                   f"このカード {_gb(need_bytes)}＋余裕 {_gb(margin)}）。"
+                                   "NAS転送で空くか、「設定」で別のSSDを中継先にすると再開します")
             self.on_update(job)
             if not waited:
                 waited = True
-                self.on_log(f"[{job.card.card_id}] 中継の空きが足りないため待機（空き {_gb(free)}）")
+                self.on_log(f"[{job.card.card_id}] " + ("中継先が見つからないため待機" if free is None
+                                                         else f"中継の空きが足りないため待機（空き {_gb(free)}）"))
             self._stop.wait(SPACE_WAIT_SEC)
         else:
             return False
@@ -334,8 +366,8 @@ class IngestManager:
         if not s.season_folder.strip():
             self._set(job, S_ERROR, "取り込み先のシーズンフォルダ名が未設定です（例: N260710）")
             return
-        if not s.dest_root or not os.path.isdir(s.dest_root):
-            self._set(job, S_ERROR, f"保存先が見つかりません: {s.dest_root}")
+        if not s.dest_root:
+            self._set(job, S_ERROR, "保存先（中継先）が未設定です。「設定」で指定してください")
             return
         if card.problems:
             self._set(job, S_ERROR, "; ".join(card.problems))
@@ -357,46 +389,54 @@ class IngestManager:
 
         season_folder = s.season_folder.strip()
         dir_name = cid
-        dest_dir = os.path.join(s.dest_root, season_folder, dir_name)
-        # 既存フォルダ: 同名ファイルがあれば、中断の再開として扱えるか manifest で判定する
-        existing_manifest = L.Ledger.read_manifest(dest_dir) if os.path.isdir(dest_dir) else None
-        existing_hashes: dict[str, tuple[int, str]] = {}
-        if existing_manifest:
-            for f in existing_manifest.get("files", []):
-                if f.get("hash"):
-                    existing_hashes[f["name"]] = (int(f["size"]), f["hash"])
-        # 途中で止まった前回の取り込み（アプリ終了・停電など）は、台帳に残るハッシュで再開する
-        if prev and prev.status in (L.STATUS_COPYING, L.STATUS_ERROR) and not prev.cleared_at \
-                and os.path.normcase(prev.staging_dir) == os.path.normcase(dest_dir):
-            for f in self.ledger.files_for(prev.id):
-                if f.hash and f.staging_ok and f.name not in existing_hashes:
-                    existing_hashes[f.name] = (f.size, f.hash)
-            self.ledger.update_ingest(prev.id, status=L.STATUS_ERROR, message="中断されたため、新しい取り込みで再開")
-            self.on_log(f"[{cid}] 前回中断した取り込みを再開します（検証済み {len(existing_hashes)} ファイルは再利用）")
-        if os.path.isdir(dest_dir):
-            for n in os.listdir(dest_dir):
-                if n.endswith(".part"):
-                    try:
-                        os.remove(os.path.join(dest_dir, n))
-                    except OSError:
-                        pass
-            present = {n for n in os.listdir(dest_dir) if n != L.MANIFEST_NAME}
-            clash = [f.name for f in card.files if f.name in present and f.name not in existing_hashes]
-            if clash:
-                self._set(job, S_ERROR, f"保存先に同名ファイルが既にあります（{clash[0]} ほか{len(clash)}件）。上書きしません")
+        while True:
+            dest_root = s.dest_root
+            dest_dir = os.path.join(dest_root, season_folder, dir_name)
+            existing_hashes: dict[str, tuple[int, str]] = {}
+            if os.path.isdir(dest_root):
+                # 既存フォルダ: 同名ファイルがあれば、中断の再開として扱えるか manifest で判定する
+                existing_manifest = L.Ledger.read_manifest(dest_dir) if os.path.isdir(dest_dir) else None
+                if existing_manifest:
+                    for f in existing_manifest.get("files", []):
+                        if f.get("hash"):
+                            existing_hashes[f["name"]] = (int(f["size"]), f["hash"])
+                # 途中で止まった前回の取り込み（アプリ終了・停電・中継がいっぱい）は、台帳に残るハッシュで再開する
+                if prev and prev.status in (L.STATUS_COPYING, L.STATUS_ERROR) and not prev.cleared_at:
+                    prev_dir = resolve_staging_dir(prev, s, self.ledger, search=False)
+                    if prev_dir and os.path.normcase(prev_dir) == os.path.normcase(dest_dir):
+                        for f in self.ledger.files_for(prev.id):
+                            if f.hash and f.staging_ok and f.name not in existing_hashes:
+                                existing_hashes[f.name] = (f.size, f.hash)
+                        self.ledger.update_ingest(prev.id, status=L.STATUS_ERROR, message="中断されたため、新しい取り込みで再開")
+                        self.on_log(f"[{cid}] 前回中断した取り込みを再開します（検証済み {len(existing_hashes)} ファイルは再利用）")
+                if os.path.isdir(dest_dir):
+                    for n in os.listdir(dest_dir):
+                        if n.endswith(".part"):
+                            try:
+                                os.remove(os.path.join(dest_dir, n))
+                            except OSError:
+                                pass
+                    present = {n for n in os.listdir(dest_dir) if n != L.MANIFEST_NAME}
+                    clash = [f.name for f in card.files if f.name in present and f.name not in existing_hashes]
+                    if clash:
+                        self._set(job, S_ERROR, f"保存先に同名ファイルが既にあります（{clash[0]} ほか{len(clash)}件）。上書きしません")
+                        return
+            # 中継の空きが足りなければ待つ（NAS転送で空く／別のSSDを中継先に設定する、のどちらでも再開できる）
+            need = card.total_bytes
+            for name, (size_, _h) in existing_hashes.items():
+                if os.path.isfile(os.path.join(dest_dir, name)):
+                    need -= size_
+            if not self._wait_for_space(job, s, max(0, need)):
                 return
-        # 中継の空きが足りなければ、NAS転送で空くのを待つ（80枚を一度に挿しても中継SSDが溢れないように）
-        need = card.total_bytes
-        for name, (size_, _h) in existing_hashes.items():
-            if os.path.isfile(os.path.join(dest_dir, name)):
-                need -= size_
-        if not self._wait_for_space(job, s, max(0, need)):
-            return
+            if s.dest_root == dest_root:
+                break
+            self.on_log(f"[{cid}] 中継先が変わったので {s.dest_root} に取り込みます")
         os.makedirs(dest_dir, exist_ok=True)
+        root_id = ensure_root_id(dest_root)
 
-        ingest_id = self.ledger.create_ingest(cid, card.card_id_norm, season_folder, dir_name, s.dest_root,
+        ingest_id = self.ledger.create_ingest(cid, card.card_id_norm, season_folder, dir_name, dest_root,
                                               s.nas_root or None, card.volume.key, card.volume.label,
-                                              card.n_files, card.total_bytes)
+                                              card.n_files, card.total_bytes, dest_root_id=root_id)
         job.ingest_id = ingest_id
         self.ledger.add_files(ingest_id, [(f.name, f.size, f.mtime, f.src_path) for f in card.files])
         self.ledger.event("ingest_start", f"{season_folder}/{dir_name} {card.n_files} files", cid)
@@ -428,7 +468,7 @@ class IngestManager:
                 nbytes, h = copy_with_hash(f.src_path, dst, prog)
             except OSError as e:
                 if e.errno == errno.ENOSPC:
-                    raise RuntimeError("中継の空きが無くなりました。空いてから「検出済みをすべて開始」で続きから再開できます") from e
+                    raise NoSpaceError("中継がいっぱいになりました") from e
                 raise RuntimeError(f"{f.name} のコピーに失敗: {e}") from e
             if nbytes != f.size:
                 raise RuntimeError(f"{f.name}: サイズ不一致（元 {f.size} / コピー {nbytes}）")

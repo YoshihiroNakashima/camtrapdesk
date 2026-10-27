@@ -106,9 +106,9 @@ def test_nas_sync_and_clear(env):
     nas_dir = env["nas"] / "N260710" / "264"
     assert sorted(os.listdir(nas_dir)) == ["IMG_0000.MP4", "IMG_0001.MP4", "manifest.json"]
     assert all(f.nas_ok for f in ledger.files_for(ing.id))
-    # 既定では NAS 検証後に中継のコピーは消える
-    assert ing.staging_cleared_at
-    assert not (env["dest"] / "N260710" / "264").exists()
+    # 既定では中継のコピーは残す（控え）
+    assert not ing.staging_cleared_at
+    assert (env["dest"] / "N260710" / "264").is_dir()
 
     # 削除判定
     vols = list_volumes(scan_roots=[str(cards)])
@@ -182,7 +182,6 @@ def test_fieldnote_mapping_and_rename(env):
     make_card(cards, "319", n_files=2)
     run_ingest(env)
     (env["dest"] / "N260710" / "UNKNOWN").mkdir()
-    s.staging_cleanup_after_nas = False   # 中継と NAS の両方を変更する経路を確かめる
     plan = build_plan(str(env["dest"]), str(env["nas"]), m, ledger)
     actions = {i.card_id: i.action for i in plan.items}
     # NAS 未転送なので syncing になるはず
@@ -314,6 +313,7 @@ def test_assign_id_to_card_without_idtxt(env):
 def test_rename_works_when_only_nas_copy_remains(env):
     """中継のコピーが（NAS検証後の自動削除で）無くても、NAS 側のフォルダだけ地点名に変えられる。"""
     s, ledger = env["settings"], env["ledger"]
+    s.staging_cleanup_after_nas = True
     make_card(env["cards"], "318", n_files=2)
     run_ingest(env)
     syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
@@ -341,7 +341,6 @@ def test_rename_works_when_only_nas_copy_remains(env):
 def test_leftover_staging_copy_is_cleaned_later(env):
     """自動削除を後から有効にしても、NAS 検証済みで中継に残っている分は待機中に消される。"""
     s, ledger = env["settings"], env["ledger"]
-    s.staging_cleanup_after_nas = False
     make_card(env["cards"], "264", n_files=2)
     run_ingest(env)
     syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
@@ -383,3 +382,108 @@ def test_ingest_waits_for_staging_space(env, monkeypatch):
     mgr.stop()
     assert job.state == S_DONE, (job.state, job.message)
     assert ledger.latest_ingest_for_card("264").status == L.STATUS_STAGED
+
+
+def _wait_until(pred, timeout=10):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return pred()
+
+
+def test_switch_staging_ssd_while_waiting(env, monkeypatch):
+    """中継がいっぱいで空き待ちのとき、設定の中継先を別のSSDに変えると、そちらへ取り込みが続く。"""
+    from camtrapdesk.core import ingest as I
+    from camtrapdesk.core import roots
+    monkeypatch.setattr(I, "SPACE_WAIT_SEC", 0.1)
+    s, ledger = env["settings"], env["ledger"]
+    s.min_free_gb = 0
+    ssd_a, ssd_b = env["dest"], env["tmp"] / "ssd_b"
+    ssd_b.mkdir()
+    monkeypatch.setattr(I, "free_bytes", lambda path: 1_000 if os.path.normpath(path) == os.path.normpath(str(ssd_a)) else 10**12)
+    make_card(env["cards"], "264", n_files=2)
+    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=lambda m: None)
+    mgr.start()
+    mgr.rescan_now()
+    assert _wait_until(lambda: any(j.state == I.S_WAITING for j in mgr.jobs.values()))
+    job = next(iter(mgr.jobs.values()))
+    s.dest_root = str(ssd_b)          # 画面の「中継先を変更…」に相当
+    assert _wait_until(lambda: job.state == S_DONE), (job.state, job.message)
+    mgr.stop()
+    ing = ledger.latest_ingest_for_card("264")
+    assert ing.dest_root == str(ssd_b) and ing.status == L.STATUS_STAGED
+    assert (ssd_b / "N260710" / "264" / "IMG_0001.MP4").is_file()
+    assert not (ssd_a / "N260710" / "264").exists()
+    # 中継先には目印が置かれ、台帳にそのIDが入る
+    assert ing.dest_root_id and roots.read_root_id(str(ssd_b)) == ing.dest_root_id
+
+
+def test_no_space_mid_copy_resumes_after_space_returns(env, monkeypatch):
+    """コピー中に中継がいっぱいになったら、エラーで止めずに待って、空いたら続きから再開する。"""
+    import errno
+    from camtrapdesk.core import ingest as I
+    monkeypatch.setattr(I, "SPACE_WAIT_SEC", 0.1)
+    s, ledger = env["settings"], env["ledger"]
+    s.min_free_gb = 0
+    state = {"fail": True}
+    real = I.copy_with_hash
+
+    def flaky(src, dst, prog=None):
+        if state["fail"] and dst.endswith("IMG_0001.MP4"):
+            state["fail"] = False
+            with open(dst + ".part", "wb") as f:
+                f.write(b"partial")
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(src, dst, prog)
+
+    monkeypatch.setattr(I, "copy_with_hash", flaky)
+    make_card(env["cards"], "264", n_files=3)
+    logs = []
+    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append)
+    mgr.start()
+    mgr.rescan_now()
+    job = None
+    assert _wait_until(lambda: bool(mgr.jobs))
+    job = next(iter(mgr.jobs.values()))
+    assert _wait_until(lambda: job.state == S_DONE), (job.state, job.message, logs)
+    mgr.stop()
+    ing = ledger.latest_ingest_for_card("264")
+    assert ing.status == L.STATUS_STAGED
+    d = env["dest"] / "N260710" / "264"
+    assert sorted(os.listdir(d)) == ["IMG_0000.MP4", "IMG_0001.MP4", "IMG_0002.MP4", "manifest.json"]
+    assert any("再開" in m for m in logs)
+    errs = [i for i in ledger.ingests() if i.status == L.STATUS_ERROR]
+    assert len(errs) == 1 and "再開" in (errs[0].message or "")   # 中断した記録は再開済みの印が付く
+
+
+def test_nas_sync_finds_staging_after_drive_letter_change(env, monkeypatch):
+    """中継SSDを抜き差ししてパスが変わっても、目印で見つけ直してNAS転送を続ける。抜いている間はエラーにせず待つ。"""
+    from camtrapdesk.core import roots
+    s, ledger = env["settings"], env["ledger"]
+    make_card(env["cards"], "264", n_files=2)
+    run_ingest(env)
+    ing = ledger.latest_ingest_for_card("264")
+    assert ing.dest_root_id
+    # SSD を抜いた: 中継先フォルダごと別の場所へ（= ドライブ文字が変わった）
+    moved = env["tmp"] / "mounted_elsewhere" / "stage"
+    moved.parent.mkdir()
+    os.rename(str(env["dest"]), str(moved))
+    monkeypatch.setattr(roots, "MISS_RETRY_SEC", 0.0)
+    monkeypatch.setattr(roots, "volume_bases", lambda exclude=(): [])   # まだどこにも見えない
+    status = []
+    syncer = NasSyncer(lambda: s, ledger, on_status=status.append, on_log=status.append)
+    syncer._tick()
+    assert ledger.latest_ingest_for_card("264").status == L.STATUS_STAGED   # エラーにしない
+    assert any("見つかりません" in m for m in status)
+    # 繋ぎ直した（別の場所に見える）
+    monkeypatch.setattr(roots, "volume_bases", lambda exclude=(): [str(env["tmp"] / "mounted_elsewhere")])
+    for _ in range(5):
+        syncer._tick()
+        if not ledger.pending_nas():
+            break
+    ing = ledger.latest_ingest_for_card("264")
+    assert ing.status == L.STATUS_SYNCED
+    assert ing.dest_root == str(moved)          # 台帳のパスも直っている
+    assert (env["nas"] / "N260710" / "264" / "IMG_0001.MP4").is_file()

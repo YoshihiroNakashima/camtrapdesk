@@ -62,7 +62,7 @@ class Settings:
     nas_verify_readback: bool = True
     delete_requires_nas: bool = True     # 削除にNAS検証済みを要求する（nas_root が空なら無視）
     nas_wait_while_ingesting: bool = True  # カードの取り込み中はNAS転送を待たせる（中継HDDの取り合いを避ける）
-    staging_cleanup_after_nas: bool = True  # NASで検証済みになったカードは中継のコピーを消す（中継の容量を小さくできる）
+    staging_cleanup_after_nas: bool = False  # NASで検証済みになったカードは中継のコピーを消す（中継の容量を小さくしたいとき）
     min_free_gb: float = 20.0              # 中継の空きがカード容量＋この余裕を下回るなら、空くまでコピーを待たせる
     poll_interval_sec: float = 3.0
     auto_start_ingest: bool = True
