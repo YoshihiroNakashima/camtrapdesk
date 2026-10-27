@@ -242,6 +242,19 @@ class Ledger:
                             staging_ok=bool(r["staging_ok"]), nas_ok=bool(r["nas_ok"]),
                             deleted_at=r["deleted_at"]) for r in rows]
 
+    def renormalize_card_ids(self) -> int:
+        """照合ルールの変更後に、全レコードの card_id_norm を計算し直す。"""
+        from .cards import normalize_card_id
+        n = 0
+        with self._lock, self._conn() as c:
+            rows = list(c.execute("SELECT id, card_id, card_id_norm FROM ingests"))
+            for r in rows:
+                new = normalize_card_id(r["card_id"])
+                if new != r["card_id_norm"]:
+                    c.execute("UPDATE ingests SET card_id_norm = ? WHERE id = ?", (new, r["id"]))
+                    n += 1
+        return n
+
     # ---------------------------------------------------------- manifest
     def write_manifest(self, ingest_id: int, directory: str, extra: dict[str, Any] | None = None) -> str:
         ing = self.get_ingest(ingest_id)

@@ -36,6 +36,9 @@ def run_ingest(env, timeout=30):
 def test_normalize_card_id():
     assert normalize_card_id("012") == "12"
     assert normalize_card_id(" 264 ") == "264"
+    assert normalize_card_id("6_650") == "650"
+    assert normalize_card_id("5_315") == "315"
+    assert normalize_card_id("BRW_573") == "573"
     assert normalize_card_id("brw-07a") == "BRW07A"
 
 
@@ -233,3 +236,20 @@ def test_fieldnote_tolerant_headers(tmp_path):
         assert False
     except ValueError as e:
         assert "KaishuSD" in str(e) and "RetrievalSD" in str(e)
+
+
+def test_rename_matches_prefixed_card_id(env):
+    """id.txt が "6_650" で野帳の RetrievalSD が 650 でも対応づく。"""
+    s, ledger = env["settings"], env["ledger"]
+    make_card(env["cards"], "6_650", n_files=1)
+    run_ingest(env)
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    while ledger.pending_nas():
+        syncer._tick()
+    fn_path = env["tmp"] / "fn.xlsx"
+    make_fieldnote(fn_path, [{"season": "N260710", "station": 1266, "ret": 650}])
+    fn = load_fieldnote(str(fn_path), s)
+    m = build_mapping(fn, "N", "N260710", s)
+    plan = build_plan(str(env["dest"]), str(env["nas"]), m, ledger)
+    it = {i.card_id: i for i in plan.items}["650"]
+    assert it.action == A_RENAME and it.src_dir_name == "6_650" and it.dst_dir_name == "BSN1266"

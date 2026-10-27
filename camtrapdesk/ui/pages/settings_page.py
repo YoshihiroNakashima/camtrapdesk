@@ -89,7 +89,10 @@ class SettingsPage(QWidget):
         self.col_type = QLineEdit(s.col_type)
         self.col_ret = QLineEdit(s.col_retrieval_sd)
         self.default_type = QLineEdit(s.default_type)
+        self.tail_match = QCheckBox("カードIDは末尾の数字で照合する（id.txt の 6_650 と野帳の 650 を同じとみなす）")
+        self.tail_match.setChecked(s.card_id_match_tail_number)
         f4.addRow("シート名", self.sheet)
+        f4.addRow("", self.tail_match)
         cols = QHBoxLayout()
         for lbl, w in (("Season", self.col_season), ("Station", self.col_station), ("Type", self.col_type),
                        ("回収SD", self.col_ret)):
@@ -155,6 +158,7 @@ class SettingsPage(QWidget):
         s.col_station = self.col_station.text().strip() or "Station"
         s.col_type = self.col_type.text().strip() or "Type"
         s.col_retrieval_sd = self.col_ret.text().strip() or "RetrievalSD"
+        s.card_id_match_tail_number = self.tail_match.isChecked()
         s.default_type = self.default_type.text().strip() or "N"
         rules: dict[str, TypeRule] = {}
         for r in range(self.rules.rowCount()):

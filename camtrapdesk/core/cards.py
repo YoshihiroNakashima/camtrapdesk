@@ -9,9 +9,21 @@ from dataclasses import dataclass, field
 from .volumes import Volume
 
 
+# カードIDの照合方法。True なら末尾の数字だけで照合する（id.txt の "6_650" と野帳の 650 を同じとみなす）。
+# 設定から AppContext が切り替える。
+MATCH_BY_TAIL_NUMBER = True
+
+
 def normalize_card_id(raw: str) -> str:
-    """照合用のカードID。数字だけなら先頭の0を落とし、それ以外は英数字のみ大文字で残す。"""
+    """照合用のカードID。
+
+    既定（末尾の数字で照合）: "6_650" → "650", "650" → "650", "012" → "12"。
+    末尾に数字が無いもの、または照合を厳密にした場合は、英数字のみ大文字にして比べる。"""
     s = (raw or "").strip()
+    if MATCH_BY_TAIL_NUMBER:
+        m = re.search(r"(\d+)\s*$", s)
+        if m:
+            return str(int(m.group(1)))
     if s.isdigit():
         return str(int(s))
     return re.sub(r"[^A-Za-z0-9]", "", s).upper()

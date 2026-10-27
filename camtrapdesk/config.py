@@ -69,6 +69,7 @@ class Settings:
     col_station: str = "Station"
     col_type: str = "Type"
     col_retrieval_sd: str = "RetrievalSD"
+    card_id_match_tail_number: bool = True   # id.txt の "6_650" と野帳の 650 を同一視する
     default_type: str = "N"
     type_rules: dict[str, TypeRule] = field(default_factory=lambda: {"N": TypeRule()})
     # --- ボリューム検出 ---

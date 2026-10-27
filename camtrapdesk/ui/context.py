@@ -25,6 +25,7 @@ class AppContext(QObject):
         super().__init__()
         self.settings: Settings = load_settings()
         self.ledger = Ledger(os.path.join(config_dir(), "ledger.sqlite"))
+        self._apply_match_mode()
         self.ingest = IngestManager(self.get_settings, self.ledger,
                                     on_update=self.job_updated.emit,
                                     on_log=self.log_message.emit,
@@ -46,7 +47,14 @@ class AppContext(QObject):
 
     def save(self) -> None:
         save_settings(self.settings)
+        self._apply_match_mode()
         self.settings_changed.emit()
+
+    def _apply_match_mode(self) -> None:
+        from ..core import cards
+        if cards.MATCH_BY_TAIL_NUMBER != self.settings.card_id_match_tail_number:
+            cards.MATCH_BY_TAIL_NUMBER = self.settings.card_id_match_tail_number
+        self.ledger.renormalize_card_ids()
 
     def start_background(self) -> None:
         self.ingest.start()
