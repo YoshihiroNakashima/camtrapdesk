@@ -33,7 +33,8 @@ class AppContext(QObject):
         self.nas = NasSyncer(self.get_settings, self.ledger,
                              on_status=self.nas_status.emit,
                              on_log=self.log_message.emit,
-                             on_progress=self.nas_progress.emit)
+                             on_progress=self.nas_progress.emit,
+                             is_ingest_busy=lambda: self.ingest.active_count() > 0)
         # 取り込みが1枚終わるたびに NAS 転送係を起こす（待ち時間なしで転送を始める）
         self.job_updated.connect(self._maybe_wake_nas)
 

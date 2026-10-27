@@ -322,6 +322,9 @@ class IngestPage(QWidget):
             color = {I.S_DONE: COLORS["ok"], I.S_ERROR: COLORS["err"], I.S_SKIPPED: COLORS["muted"],
                      I.S_COPYING: COLORS["info"], I.S_VERIFYING: COLORS["info"], I.S_REMOVED: COLORS["warn"]}.get(st)
             prog = f"{job.progress*100:.0f}%" if st in (I.S_COPYING, I.S_VERIFYING) else ("100%" if st == I.S_DONE else "")
+            spd = job.speed_mbps
+            if prog and spd:
+                prog += f" ({spd:.0f} MB/s)"
             set_row(self.table, r, [self.ctx.slot_label(job.card.volume), job.card.card_id, str(job.card.n_files),
                                     human_size(job.card.total_bytes), I.STATE_LABELS.get(st, st), prog, job.message],
                     color)

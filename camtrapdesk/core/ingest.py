@@ -52,7 +52,17 @@ class CardJob:
     done_files: int = 0
     ingest_id: int | None = None
     started: float = field(default_factory=time.time)
+    copy_started: float | None = None
     finished: float | None = None
+
+    @property
+    def speed_mbps(self) -> float | None:
+        """コピー開始からの平均速度（MB/s）。"""
+        if not self.copy_started:
+            return None
+        end = self.finished or time.time()
+        dt = end - self.copy_started
+        return (self.done_bytes / 1e6 / dt) if dt > 0.5 else None
 
     @property
     def progress(self) -> float:
@@ -99,6 +109,10 @@ class IngestManager:
 
     def rescan_now(self) -> None:
         self._scan_once()
+
+    def active_count(self) -> int:
+        with self._lock:
+            return sum(1 for j in self.jobs.values() if j.state in (S_QUEUED, S_COPYING, S_VERIFYING))
 
     def enqueue(self, key: str) -> None:
         with self._lock:
@@ -310,6 +324,7 @@ class IngestManager:
         self.on_log(f"[{cid}] コピー開始 → {dest_dir}（{card.n_files}ファイル, {card.total_bytes/1e9:.2f} GB）")
 
         base_done = 0
+        job.copy_started = time.time()
         for i, f in enumerate(card.files, 1):
             if self._stop.is_set():
                 raise RuntimeError("停止されました")

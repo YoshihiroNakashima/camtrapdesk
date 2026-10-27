@@ -17,8 +17,10 @@ from .hashing import copy_with_hash, hash_file
 class NasSyncer:
     def __init__(self, get_settings: Callable[[], Settings], ledger: L.Ledger,
                  on_status: Callable[[str], None], on_log: Callable[[str], None],
-                 on_progress: Callable[[str, float], None] | None = None):
+                 on_progress: Callable[[str, float], None] | None = None,
+                 is_ingest_busy: Callable[[], bool] | None = None):
         self.get_settings = get_settings
+        self.is_ingest_busy = is_ingest_busy
         self.ledger = ledger
         self.on_status = on_status
         self.on_log = on_log
@@ -66,6 +68,9 @@ class NasSyncer:
         if not pending:
             self.on_status("NAS転送: 待機中（未転送なし）")
             return 15.0
+        if self.get_settings().nas_wait_while_ingesting and self.is_ingest_busy and self.is_ingest_busy():
+            self.on_status(f"NAS転送: カードの取り込み中のため待機（{len(pending)}件）。取り込みが終わると再開します")
+            return 5.0
         ing = pending[0]
         nas_root = ing.nas_root or ""
         if not nas_root or not os.path.isdir(nas_root):

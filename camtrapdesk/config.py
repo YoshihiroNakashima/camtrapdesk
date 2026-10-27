@@ -60,6 +60,7 @@ class Settings:
     verify_readback: bool = True
     nas_verify_readback: bool = True
     delete_requires_nas: bool = True     # 削除にNAS検証済みを要求する（nas_root が空なら無視）
+    nas_wait_while_ingesting: bool = True  # カードの取り込み中はNAS転送を待たせる（中継HDDの取り合いを避ける）
     poll_interval_sec: float = 3.0
     auto_start_ingest: bool = True
     # --- 野帳 ---
