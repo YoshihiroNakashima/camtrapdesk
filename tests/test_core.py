@@ -158,7 +158,6 @@ def test_fieldnote_mapping_and_rename(env):
     by = {e.station_folder: e for e in m.entries}
     assert by["BSN0592"].card_id == "318" and not by["BSN0592"].errors
     assert by["BSN0482"].errors and by["BSN0980"].errors        # 重複は両方保留
-    assert any("前回設置SD(555" in w for w in by["BSN0980"].warnings)  # 555 vs 319
     assert m.issues
 
     # フォルダを用意: 318, 295 は取り込み済み。777 は別Type。
@@ -210,3 +209,27 @@ def test_real_fieldnote_if_present():
     assert len(dup) == 20   # 10組の重複
     ok = [e for e in m.entries if not e.errors]
     assert all(e.station_folder.startswith("BSN") and len(e.station_folder) == 7 for e in ok)
+
+
+def test_fieldnote_tolerant_headers(tmp_path):
+    from openpyxl import Workbook
+    wb = Workbook(); ws = wb.active; ws.title = "Sheet1"
+    ws.append(["Date", "Time", "Season", "State", "Statuion", "Type", "InstallationSD", "RetrievalSD"])
+    ws.append(["2026/10/17", None, "N261016", "継続", 690, "N", 269, 263])
+    ws.append(["2026/10/17", None, "N261016", "継続", 617, "W", 640, 315])
+    p = tmp_path / "dna.xlsx"; wb.save(p)
+    s = Settings()
+    fn = load_fieldnote(str(p), s)
+    assert any("Statuion" in n for n in fn.notes)
+    assert fn.seasons("N") == ["N261016"]
+    m = build_mapping(fn, "N", "N261016", s)
+    assert m.season_folder == "N261016"          # 接頭辞が付いていれば二重に付けない
+    assert [e.station_folder for e in m.entries] == ["BSN0690"]
+    assert m.entries[0].card_id == "263"
+    # 列が本当に無いときは、ファイルの列一覧を含むエラー
+    s2 = Settings(col_retrieval_sd="KaishuSD")
+    try:
+        load_fieldnote(str(p), s2)
+        assert False
+    except ValueError as e:
+        assert "KaishuSD" in str(e) and "RetrievalSD" in str(e)

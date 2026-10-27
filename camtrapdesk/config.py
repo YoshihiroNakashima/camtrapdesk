@@ -69,7 +69,6 @@ class Settings:
     col_station: str = "Station"
     col_type: str = "Type"
     col_retrieval_sd: str = "RetrievalSD"
-    col_installation_sd: str = "InstallationSD"
     default_type: str = "N"
     type_rules: dict[str, TypeRule] = field(default_factory=lambda: {"N": TypeRule()})
     # --- ボリューム検出 ---

@@ -1,7 +1,8 @@
-"""野帳（Excel）の読み込みと、カードID→地点名の対応表づくり。"""
+"""野帳（Excel）の読み込みと、カードID（回収SD）→地点名の対応表づくり。"""
 
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, date
@@ -26,6 +27,10 @@ def _s(v: Any) -> str:
     return str(v).strip()
 
 
+def _norm_header(h: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (h or "").lower())
+
+
 @dataclass
 class FieldnoteRow:
     row_no: int               # Excel の行番号（1始まり、見出しを含む）
@@ -33,7 +38,6 @@ class FieldnoteRow:
     station: str
     type_code: str
     retrieval_sd: str
-    installation_sd: str
     date: str = ""
     state: str = ""
     remarks: str = ""
@@ -46,6 +50,7 @@ class Fieldnote:
     sheets: list[str]
     header: list[str]
     rows: list[FieldnoteRow]
+    notes: list[str] = field(default_factory=list)   # 列名の読み替えなど、読み込み時の注意
 
     def types(self) -> list[str]:
         seen: dict[str, int] = {}
@@ -70,6 +75,30 @@ def list_sheets(path: str) -> list[str]:
         wb.close()
 
 
+def _resolve_columns(header: list[str], wanted: dict[str, str]) -> tuple[dict[str, int], list[str], list[str]]:
+    """設定の列名を見出し行に対応づける。大文字小文字・空白・記号の違いは無視し、
+    綴りの揺れ（Statuion など）は近い名前を採用して注意に残す。"""
+    by_norm: dict[str, int] = {}
+    for i, h in enumerate(header):
+        if h and _norm_header(h) not in by_norm:
+            by_norm[_norm_header(h)] = i
+    idx: dict[str, int] = {}
+    notes: list[str] = []
+    missing: list[str] = []
+    for key, name in wanted.items():
+        n = _norm_header(name)
+        if n in by_norm:
+            idx[key] = by_norm[n]
+            continue
+        close = difflib.get_close_matches(n, list(by_norm), n=1, cutoff=0.8)
+        if close:
+            idx[key] = by_norm[close[0]]
+            notes.append(f"列 '{header[by_norm[close[0]]]}' を '{name}' として読みました")
+        else:
+            missing.append(name)
+    return idx, notes, missing
+
+
 def load_fieldnote(path: str, s: Settings, sheet: str | None = None) -> Fieldnote:
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
@@ -78,16 +107,21 @@ def load_fieldnote(path: str, s: Settings, sheet: str | None = None) -> Fieldnot
             raise ValueError(f"シート '{sheet_name}' がありません。あるシート: {', '.join(wb.sheetnames)}")
         ws = wb[sheet_name]
         it = ws.iter_rows(values_only=True)
-        header = [_s(h) for h in next(it)]
-        idx = {h: i for i, h in enumerate(header) if h}
-        need = {"season": s.col_season, "station": s.col_station, "type": s.col_type,
-                "retrieval": s.col_retrieval_sd, "installation": s.col_installation_sd}
-        missing = [c for c in need.values() if c not in idx]
+        try:
+            header = [_s(h) for h in next(it)]
+        except StopIteration:
+            raise ValueError("シートが空です")
+        wanted = {"season": s.col_season, "station": s.col_station, "type": s.col_type,
+                  "retrieval": s.col_retrieval_sd}
+        idx, notes, missing = _resolve_columns(header, wanted)
         if missing:
-            raise ValueError("野帳に列がありません: " + ", ".join(missing) + "（設定で列名を確認してください）")
+            cols = ", ".join(h for h in header if h)
+            raise ValueError("野帳に列がありません: " + ", ".join(missing)
+                             + f"\n\nこのファイルの列: {cols}\n\n設定画面の「野帳の列名」をこのファイルに合わせてください。")
+        extra, _n, _m = _resolve_columns(header, {"date": "Date", "state": "State", "remarks": "Remarks"})
 
-        def get(row: tuple, name: str) -> str:
-            i = idx.get(name)
+        def get(row: tuple, key: str, table: dict[str, int]) -> str:
+            i = table.get(key)
             return _s(row[i]) if i is not None and i < len(row) else ""
 
         rows: list[FieldnoteRow] = []
@@ -96,16 +130,16 @@ def load_fieldnote(path: str, s: Settings, sheet: str | None = None) -> Fieldnot
                 continue
             rows.append(FieldnoteRow(
                 row_no=n,
-                season=get(row, s.col_season),
-                station=get(row, s.col_station),
-                type_code=get(row, s.col_type),
-                retrieval_sd=get(row, s.col_retrieval_sd),
-                installation_sd=get(row, s.col_installation_sd),
-                date=get(row, "Date"),
-                state=get(row, "State"),
-                remarks=get(row, "Remarks"),
+                season=get(row, "season", idx),
+                station=get(row, "station", idx),
+                type_code=get(row, "type", idx),
+                retrieval_sd=get(row, "retrieval", idx),
+                date=get(row, "date", extra),
+                state=get(row, "state", extra),
+                remarks=get(row, "remarks", extra),
             ))
-        return Fieldnote(path=path, sheet=sheet_name, sheets=list(wb.sheetnames), header=header, rows=rows)
+        return Fieldnote(path=path, sheet=sheet_name, sheets=list(wb.sheetnames), header=header, rows=rows,
+                         notes=notes)
     finally:
         wb.close()
 
@@ -133,10 +167,11 @@ def format_station(raw: str, rule: TypeRule) -> str:
 
 
 def format_season_folder(season: str, rule: TypeRule) -> str:
+    """シーズンのフォルダ名。'260710' → 'N260710'。既に 'N260710' ならそのまま。"""
     s = (season or "").strip()
     if not s:
         return ""
-    if s.startswith(rule.season_prefix):
+    if rule.season_prefix and s.startswith(rule.season_prefix):
         return s
     return f"{rule.season_prefix}{s}"
 
@@ -147,14 +182,13 @@ def format_season_folder(season: str, rule: TypeRule) -> str:
 
 @dataclass
 class MapEntry:
-    card_id: str            # 野帳の値（文字列化）
+    card_id: str            # 野帳の回収SD（文字列化）
     card_id_norm: str
     station_folder: str     # 整形後の地点名（フォルダ名）
     row_no: int
     date: str = ""
     state: str = ""
     remarks: str = ""
-    prev_installation_sd: str = ""   # 同じ地点の前回設置SD（突合用）
     warnings: list[str] = field(default_factory=list)   # 変更は可能だが注意
     errors: list[str] = field(default_factory=list)     # この行は変更しない
 
@@ -174,48 +208,30 @@ class Mapping:
         return d
 
 
-def build_mapping(fn: Fieldnote, type_code: str, season: str, s: Settings,
-                  use_installation: bool = False) -> Mapping:
-    """選んだ Type と Season の行から、カードID→地点フォルダ名の対応表を作る。
+def build_mapping(fn: Fieldnote, type_code: str, season: str, s: Settings) -> Mapping:
+    """選んだ Type と Season の行から、回収SDのカードID→地点フォルダ名の対応表を作る。
 
     重複（同じカードIDが複数行、整形後の地点名が複数行）は該当行にエラーを付け、
-    それ以外の行は変更可能なままにする。前回設置SDとの突合は警告として付ける。
+    それ以外の行は変更可能なままにする。
     """
     rule = s.rule_for(type_code)
     rows = fn.select(type_code, season)
     season_folder = format_season_folder(season, rule)
     entries: list[MapEntry] = []
-    issues: list[str] = []
+    issues: list[str] = list(fn.notes)
     if not rows:
         issues.append(f"Type={type_code}, Season={season} の行がありません")
         return Mapping(type_code, season, season_folder, [], issues)
 
-    # 前回設置SDの索引: (type, station整形後) → 時系列で最後の installation_sd（この season より前）
-    prev_inst: dict[str, tuple[str, str]] = {}
-    for r in fn.rows:
-        if r.type_code != type_code or not r.installation_sd:
-            continue
-        if r.season >= season:
-            continue
-        st = format_station(r.station, rule)
-        cur = prev_inst.get(st)
-        if cur is None or r.season > cur[0]:
-            prev_inst[st] = (r.season, r.installation_sd)
-
     for r in rows:
-        sd = r.installation_sd if use_installation else r.retrieval_sd
+        sd = r.retrieval_sd
         st = format_station(r.station, rule)
         e = MapEntry(card_id=sd, card_id_norm=normalize_card_id(sd) if sd else "", station_folder=st,
                      row_no=r.row_no, date=r.date, state=r.state, remarks=r.remarks)
         if not sd:
-            e.errors.append("SD列が空")
+            e.errors.append("回収SD列が空")
         if not st:
             e.errors.append("Station列が空")
-        pi = prev_inst.get(st)
-        if pi:
-            e.prev_installation_sd = pi[1]
-            if sd and normalize_card_id(pi[1]) != normalize_card_id(sd):
-                e.warnings.append(f"前回設置SD({pi[1]}, {pi[0]})と今回回収SD({sd})が不一致")
         entries.append(e)
 
     # 重複チェック

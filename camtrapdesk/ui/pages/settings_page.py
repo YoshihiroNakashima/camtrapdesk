@@ -80,25 +80,22 @@ class SettingsPage(QWidget):
         lay.addWidget(g3)
 
         # --- 野帳 ---
-        g4 = QGroupBox("野帳")
+        g4 = QGroupBox("野帳（ファイルは「名前変更」画面で選びます）")
         f4 = QFormLayout(g4)
-        self.fieldnote_path = PathRow(s.fieldnote_path, "file")
         self.sheet = QLineEdit(s.fieldnote_sheet)
         self.sheet.setPlaceholderText("空なら最初のシート")
         self.col_season = QLineEdit(s.col_season)
         self.col_station = QLineEdit(s.col_station)
         self.col_type = QLineEdit(s.col_type)
         self.col_ret = QLineEdit(s.col_retrieval_sd)
-        self.col_inst = QLineEdit(s.col_installation_sd)
         self.default_type = QLineEdit(s.default_type)
-        f4.addRow("野帳のExcel", self.fieldnote_path)
         f4.addRow("シート名", self.sheet)
         cols = QHBoxLayout()
         for lbl, w in (("Season", self.col_season), ("Station", self.col_station), ("Type", self.col_type),
-                       ("回収SD", self.col_ret), ("設置SD", self.col_inst)):
+                       ("回収SD", self.col_ret)):
             cols.addWidget(QLabel(lbl))
             cols.addWidget(w)
-        f4.addRow("列名", cols)
+        f4.addRow("列名（大文字小文字や綴りの揺れは自動で読み替え）", cols)
         f4.addRow("既定の Type", self.default_type)
         self.rules = QTableWidget(0, 4)
         self.rules.setHorizontalHeaderLabels(["Type", "Seasonの接頭辞", "Stationの接頭辞", "ゼロ埋め桁数"])
@@ -153,13 +150,11 @@ class SettingsPage(QWidget):
         s.poll_interval_sec = float(self.poll.value())
         s.scan_roots = self._split(self.scan_roots.text())
         s.exclude_volumes = self._split(self.exclude.text())
-        s.fieldnote_path = self.fieldnote_path.text()
         s.fieldnote_sheet = self.sheet.text().strip()
         s.col_season = self.col_season.text().strip() or "Season"
         s.col_station = self.col_station.text().strip() or "Station"
         s.col_type = self.col_type.text().strip() or "Type"
         s.col_retrieval_sd = self.col_ret.text().strip() or "RetrievalSD"
-        s.col_installation_sd = self.col_inst.text().strip() or "InstallationSD"
         s.default_type = self.default_type.text().strip() or "N"
         rules: dict[str, TypeRule] = {}
         for r in range(self.rules.rowCount()):

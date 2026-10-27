@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMessageBox,
-                               QPlainTextEdit, QPushButton, QRadioButton, QVBoxLayout, QWidget, QSplitter)
+                               QPlainTextEdit, QPushButton, QVBoxLayout, QWidget, QSplitter)
 from PySide6.QtCore import Qt
 
 from ...core import rename as R
@@ -24,6 +24,7 @@ class RenamePage(QWidget):
         box = QGroupBox("野帳と対象")
         form = QFormLayout(box)
         self.path_row = PathRow(s.fieldnote_path, mode="file", placeholder="野帳写し.xlsx")
+        self.path_row.edit.editingFinished.connect(self._path_edited)
         form.addRow("野帳（Excel）", self.path_row)
         h = QHBoxLayout()
         self.sheet_combo = QComboBox()
@@ -38,16 +39,11 @@ class RenamePage(QWidget):
         self.type_combo = QComboBox()
         self.type_combo.currentTextChanged.connect(self._type_changed)
         self.season_combo = QComboBox()
-        self.sd_ret = QRadioButton("RetrievalSD（回収したカード）")
-        self.sd_ret.setChecked(True)
-        self.sd_inst = QRadioButton("InstallationSD（設置したカード）")
         h2.addWidget(QLabel("Type"))
         h2.addWidget(self.type_combo)
         h2.addWidget(QLabel("Season"))
         h2.addWidget(self.season_combo)
-        h2.addWidget(QLabel("照合する列:"))
-        h2.addWidget(self.sd_ret)
-        h2.addWidget(self.sd_inst)
+        h2.addWidget(QLabel("（野帳の回収SD列のカードIDを地点名に対応づけます）"))
         h2.addStretch(1)
         form.addRow("対象", h2)
         h3 = QHBoxLayout()
@@ -77,8 +73,14 @@ class RenamePage(QWidget):
         ctx.settings_changed.connect(self._settings_changed)
 
     def _settings_changed(self) -> None:
-        if not self.path_row.text():
+        if self.path_row.text() != self.ctx.settings.fieldnote_path:
             self.path_row.setText(self.ctx.settings.fieldnote_path)
+
+    def _path_edited(self) -> None:
+        p = self.path_row.text()
+        if p != self.ctx.settings.fieldnote_path:
+            self.ctx.settings.fieldnote_path = p
+            self.ctx.save()
 
     # ------------------------------------------------------------------
     def load_fieldnote(self) -> None:
@@ -109,7 +111,10 @@ class RenamePage(QWidget):
             self.type_combo.setCurrentText(default_type)
         self.type_combo.blockSignals(False)
         self._type_changed(self.type_combo.currentText())
-        self.issues.setPlainText(f"読み込みました: {len(fn.rows)} 行、Type: {', '.join(fn.types()[:8])}")
+        msg = f"読み込みました: {len(fn.rows)} 行、Type: {', '.join(fn.types()[:8])}"
+        if fn.notes:
+            msg += "\n" + "\n".join(" - " + n for n in fn.notes)
+        self.issues.setPlainText(msg)
         self.apply_btn.setEnabled(False)
 
     def _type_changed(self, t: str) -> None:
@@ -144,7 +149,7 @@ class RenamePage(QWidget):
         if not root:
             QMessageBox.warning(self, "フォルダ", "変更するフォルダの場所（保存先かNAS）が設定されていません。")
             return
-        mapping = build_mapping(self.fieldnote, t, season, self.ctx.settings, use_installation=self.sd_inst.isChecked())
+        mapping = build_mapping(self.fieldnote, t, season, self.ctx.settings)
         plan = R.build_plan(root, nas_root, mapping, self.ctx.ledger)
         self.plan = plan
         self._show_plan(plan)
