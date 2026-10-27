@@ -29,7 +29,8 @@ class AppContext(QObject):
         self.ingest = IngestManager(self.get_settings, self.ledger,
                                     on_update=self.job_updated.emit,
                                     on_log=self.log_message.emit,
-                                    on_batch_done=self.batch_done.emit)
+                                    on_batch_done=self.batch_done.emit,
+                                    reader_group=self.reader_group)
         self.nas = NasSyncer(self.get_settings, self.ledger,
                              on_status=self.nas_status.emit,
                              on_log=self.log_message.emit,
@@ -50,6 +51,15 @@ class AppContext(QObject):
         """スロットに名前が付いていれば「名前 (K:)」、無ければドライブ表示だけ。"""
         name = self.settings.slot_names.get(volume.key)
         return f"{name} ({volume.display})" if name else volume.display
+
+    def reader_group(self, volume) -> str:
+        """スロット名「U1-3-B」の最後の区切りより前（U1-3）をリーダーの識別として使う。名前が無ければ空。"""
+        import re
+        name = self.settings.slot_names.get(volume.key, "")
+        if not name:
+            return ""
+        parts = re.split(r"[-_/ ]", name)
+        return "-".join(parts[:-1]) if len(parts) > 1 else name
 
     def slot_sort_key(self, volume) -> tuple:
         import re

@@ -74,8 +74,10 @@ class IngestManager:
 
     def __init__(self, get_settings: Callable[[], Settings], ledger: L.Ledger,
                  on_update: Callable[[CardJob], None], on_log: Callable[[str], None],
-                 on_batch_done: Callable[[int], None] | None = None):
+                 on_batch_done: Callable[[int], None] | None = None,
+                 reader_group: Callable[[Volume], str] | None = None):
         self.get_settings = get_settings
+        self.reader_group = reader_group   # ボリューム → リーダーの識別（同じリーダーに並列が偏らないように順番を組む）
         self.ledger = ledger
         self.on_update = on_update
         self.on_log = on_log
@@ -209,7 +211,7 @@ class IngestManager:
                     job.message = "注意: " + "; ".join(c.warnings)
                 self.jobs[c.volume.key] = job
                 new_jobs.append(job)
-        for job in new_jobs:
+        for job in self._interleave(new_jobs):
             self.on_update(job)
             if job.state == S_ERROR:
                 self.on_log(f"[{job.card.card_id}] {job.message}")
@@ -218,6 +220,26 @@ class IngestManager:
             else:
                 self.on_log(f"[{job.card.card_id}] 検出（{job.card.n_files}ファイル, {job.card.total_bytes/1e9:.2f} GB）")
         self._check_batch_done()
+
+    def _interleave(self, jobs: list[CardJob]) -> list[CardJob]:
+        """同じリーダーのカードが連続しないように、リーダーごとに順番に1枚ずつ取り出して並べる。
+        安価な多スロットリーダーは1台あたりの合計速度に上限があるため、並列コピーが1台に偏ると遅くなる。"""
+        if not self.reader_group or len(jobs) < 2:
+            return jobs
+        groups: dict[str, list[CardJob]] = {}
+        order: list[str] = []
+        for j in jobs:
+            g = self.reader_group(j.card.volume) or ""
+            if g not in groups:
+                groups[g] = []
+                order.append(g)
+            groups[g].append(j)
+        out: list[CardJob] = []
+        while any(groups.values()):
+            for g in order:
+                if groups[g]:
+                    out.append(groups[g].pop(0))
+        return out
 
     def _check_batch_done(self) -> None:
         with self._lock:
