@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 
 from openpyxl import Workbook
@@ -892,12 +893,25 @@ def test_batch_convert_stop(env):
         assert make_avi(d / f"S{i}.AVI", seconds=6)
     res = B.scan(str(d), s, None)
     bc = B.BatchConverter(lambda: s, None, on_status=lambda m: None, on_log=lambda m: None)
-    bc.start(res, parallel=1)
-    time.sleep(0.3)
-    bc.stop()
-    bc.wait(60)
+    # 速いマシンでも確実に途中で止めるため、最初の 1 本が終わった時点で中止する
+    done_once = threading.Event()
+    orig = B.BatchConverter._convert_one
+
+    def hooked(self, fp, t, ffmpeg):
+        r = orig(self, fp, t, ffmpeg)
+        if not done_once.is_set():
+            done_once.set()
+            self.stop()
+        return r
+
+    B.BatchConverter._convert_one = hooked
+    try:
+        bc.start(res, parallel=1)
+        bc.wait(60)
+    finally:
+        B.BatchConverter._convert_one = orig
     st = bc.snapshot()
-    assert st.stopped and st.n_done < 4
+    assert st.stopped and 1 <= st.n_done < 4
     names = os.listdir(d)
     assert not any(n.endswith(".part") for n in names)
     assert sum(1 for n in names if n.endswith(".AVI")) + st.n_done == 4
@@ -948,3 +962,17 @@ def test_broken_ffmpeg_binary_is_skipped(tmp_path, monkeypatch):
     found = F.find_ffmpeg(str(bad))        # 設定で壊れたものを指しても、次の候補（本物）へ進む
     assert found != str(bad) and found == real
     F.forget_ffmpeg()
+
+
+def test_probe_without_ffprobe(monkeypatch, tmp_path):
+    """ffprobe が無い環境（imageio-ffmpeg 同梱の ffmpeg だけ）でも、長さ・コーデック・解像度が読める。"""
+    import pytest
+    from camtrapdesk.core import ffmpeg as F
+    ff = F.find_ffmpeg()
+    if not ff:
+        pytest.skip("ffmpeg が無い")
+    p = make_avi(tmp_path / "x.avi", seconds=1)
+    assert p
+    monkeypatch.setattr(F, "ffprobe_path", lambda ffmpeg: None)
+    info = F.probe(ff, str(p))
+    assert info and info.vcodec == "mjpeg" and (info.width, info.height) == (96, 64) and abs(info.duration - 1.0) < 0.3

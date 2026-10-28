@@ -18,7 +18,7 @@ class AppContext(QObject):
     # バックグラウンドスレッドから発火される（Qt がメインスレッドへキューする）
     job_updated = Signal(object)        # CardJob
     log_message = Signal(str)
-    batch_done = Signal(int)
+    ingest_batch_done = Signal(int)     # 挿したカードの一括がすべて終わった（枚数）
     nas_status = Signal(str)
     nas_progress = Signal(str, float)
     convert_status = Signal(str)
@@ -35,7 +35,7 @@ class AppContext(QObject):
         self.ingest = IngestManager(self.get_settings, self.ledger,
                                     on_update=self.job_updated.emit,
                                     on_log=self.log_message.emit,
-                                    on_batch_done=self.batch_done.emit,
+                                    on_batch_done=self.ingest_batch_done.emit,
                                     reader_group=self.reader_group)
         self.nas = NasSyncer(self.get_settings, self.ledger,
                              on_status=self.nas_status.emit,

@@ -93,7 +93,7 @@ class IngestPage(QWidget):
         # --- シグナル ---
         ctx.job_updated.connect(self._on_job_updated)
         ctx.log_message.connect(self._append_log)
-        ctx.batch_done.connect(self._on_batch_done)
+        ctx.ingest_batch_done.connect(self._on_batch_done)
         ctx.nas_status.connect(self._on_nas_status)
         ctx.nas_progress.connect(self._on_nas_progress)
         ctx.convert_status.connect(self._on_convert_status)

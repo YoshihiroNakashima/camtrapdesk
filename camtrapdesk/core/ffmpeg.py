@@ -245,14 +245,19 @@ def probe(ffmpeg: str, path: str) -> MediaInfo | None:
             except (ValueError, TypeError):
                 return None
         return None
-    # ffprobe 無し: ffmpeg -i の stderr から Duration を読む
+    # ffprobe 無し（imageio-ffmpeg 同梱の ffmpeg だけの環境など）: ffmpeg -i の stderr から読む
     r = _run([ffmpeg, "-hide_banner", "-i", path], timeout=120)
     import re
-    m = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", r.stderr)
+    err = r.stderr or ""
+    m = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", err)
     if not m:
         return None
     dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
-    return MediaInfo(duration=dur, has_audio="Audio:" in r.stderr)
+    info = MediaInfo(duration=dur, has_audio=bool(re.search(r"Stream #\d+:\d+.*?: Audio:", err)))
+    v = re.search(r"Stream #\d+:\d+.*?: Video: (\w+)[^\n]*?(\d{2,5})x(\d{2,5})", err)
+    if v:
+        info.vcodec, info.width, info.height = v.group(1).lower(), int(v.group(2)), int(v.group(3))
+    return info
 
 
 def _quality_args(encoder: str, crf: int) -> list[str]:
