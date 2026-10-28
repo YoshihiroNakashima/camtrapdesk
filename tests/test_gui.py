@@ -14,7 +14,7 @@ from camtrapdesk.config import save_settings  # noqa: E402
 from camtrapdesk.core import ingest as I  # noqa: E402
 from camtrapdesk.core import ledger as L  # noqa: E402
 
-from conftest import make_card  # noqa: E402
+from conftest import make_card, nakashima_settings  # noqa: E402
 from test_core import make_fieldnote  # noqa: E402
 
 
@@ -38,21 +38,27 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
     make_card(cards, "318", n_files=2)
     make_card(cards, "295", n_files=2)
 
-    from camtrapdesk.config import Settings
-    s = Settings(dest_root=str(dest), nas_root=str(nas), season_folder="N260710", scan_roots=[str(cards)],
-                 fieldnote_path=str(fn_path), concurrency=2, poll_interval_sec=0.2)
+    s = nakashima_settings(dest_root=str(dest), nas_root=str(nas), season_folder="N260710", scan_roots=[str(cards)],
+                           fieldnote_path=str(fn_path), concurrency=2, poll_interval_sec=0.2)
     save_settings(s)
 
     app = QApplication.instance() or QApplication([])
     from camtrapdesk.ui.context import AppContext
     from camtrapdesk.ui.main_window import MainWindow
+    from camtrapdesk.ui.pages.clear_page import ClearPage
+    from camtrapdesk.ui.pages.id_page import IdPage
+    from camtrapdesk.ui.pages.ingest_page import IngestPage
+    from camtrapdesk.ui.pages.ledger_page import LedgerPage
+    from camtrapdesk.ui.pages.rename_page import RenamePage
+    from camtrapdesk.ui.pages.settings_page import SettingsPage
+    from camtrapdesk.ui.pages.slot_page import SlotPage
     ctx = AppContext()
     win = MainWindow(ctx)
     win.show()
     ctx.start_background()
 
     # 取り込みが終わるまで
-    ingest_page = win.stack.widget(1)
+    ingest_page = win.page(IngestPage)
     for _ in range(100):
         _pump(app, 0.2)
         jobs = list(ctx.ingest.jobs.values())
@@ -70,8 +76,8 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
     win.grab().save(str(tmp_path / "ingest.png"))
 
     # 名前変更
-    rename_page = win.stack.widget(2)
-    win.nav.setCurrentRow(2)
+    rename_page = win.page(RenamePage)
+    win.show_page(RenamePage)
     rename_page.load_fieldnote()
     assert rename_page.type_combo.currentText() == "N"
     assert rename_page.season_combo.currentText() == "260710"
@@ -85,18 +91,21 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
     win.grab().save(str(tmp_path / "rename.png"))
 
     # 削除
-    clear_page = win.stack.widget(3)
-    win.nav.setCurrentRow(3)
+    clear_page = win.page(ClearPage)
+    win.show_page(ClearPage)
     clear_page.check()
     assert all(v.ok for v in clear_page.verdicts)
     clear_page.delete()
     assert os.listdir(cards / "vol_318" / "DCIM" / "100_BTCF") == []
     win.grab().save(str(tmp_path / "clear.png"))
 
-    # 台帳・設定画面も開く
-    win.nav.setCurrentRow(5)
-    _pump(app, 0.2)
-    win.nav.setCurrentRow(win.nav.count() - 1)
-    _pump(app, 0.2)
+    # 残りの画面も開く（ID付け・スロット名は挿さっているカードを一覧にする）
+    for cls in (LedgerPage, SettingsPage, IdPage, SlotPage):
+        win.show_page(cls)
+        _pump(app, 0.2)
+    win.page(IdPage).scan()
+    assert win.page(IdPage).table.rowCount() == 2
+    win.page(SlotPage).scan()
+    assert win.page(SlotPage).table.rowCount() == 2
     win.close()
     _pump(app, 0.2)

@@ -334,31 +334,38 @@ class Ledger:
         added = 0
         if not os.path.isdir(root):
             return 0
-        for season in sorted(os.listdir(root)):
-            sdir = os.path.join(root, season)
-            if not os.path.isdir(sdir):
+        # root/<season>/<dir>/manifest.json と、シーズンフォルダ無しの root/<dir>/manifest.json の両方を見る
+        candidates: list[tuple[str, str, str]] = []
+        for name in sorted(os.listdir(root)):
+            p1 = os.path.join(root, name)
+            if not os.path.isdir(p1):
                 continue
-            for d in sorted(os.listdir(sdir)):
-                ddir = os.path.join(sdir, d)
-                m = self.read_manifest(ddir)
-                if not m:
-                    continue
-                if self.find_by_dir(season, d):
-                    continue
-                from .cards import normalize_card_id
-                iid = self.create_ingest(m.get("card_id", d), normalize_card_id(m.get("card_id", d)),
-                                         season, d, root, nas_root, m.get("source_volume") or "",
-                                         m.get("source_label") or "", m.get("n_files", 0), m.get("total_bytes", 0))
-                self.add_files(iid, [(f["name"], f["size"], f.get("mtime") or 0.0, None) for f in m.get("files", [])])
-                for f in m.get("files", []):
-                    if f.get("hash"):
-                        self.set_file_hash(iid, f["name"], f["hash"], True)
-                status = STATUS_SYNCED if m.get("nas_verified_at") else STATUS_STAGED
-                self.update_ingest(iid, status=status, station=m.get("station"),
-                                   started_at=m.get("started_at"), finished_at=m.get("finished_at"),
-                                   staging_verified_at=m.get("staging_verified_at"),
-                                   nas_verified_at=m.get("nas_verified_at"),
-                                   staging_cleared_at=m.get("staging_cleared_at"),
-                                   message="manifest から再構築")
-                added += 1
+            if os.path.isfile(os.path.join(p1, MANIFEST_NAME)):
+                candidates.append(("", name, p1))
+                continue
+            for d in sorted(os.listdir(p1)):
+                p2 = os.path.join(p1, d)
+                if os.path.isdir(p2) and os.path.isfile(os.path.join(p2, MANIFEST_NAME)):
+                    candidates.append((name, d, p2))
+        from .cards import normalize_card_id
+        for season, d, ddir in candidates:
+            m = self.read_manifest(ddir)
+            if not m or self.find_by_dir(season, d):
+                continue
+            iid = self.create_ingest(m.get("card_id", d), normalize_card_id(m.get("card_id", d)),
+                                     season, d, root, nas_root, m.get("source_volume") or "",
+                                     m.get("source_label") or "", m.get("n_files", 0), m.get("total_bytes", 0),
+                                     dest_root_id=m.get("dest_root_id"))
+            self.add_files(iid, [(f["name"], f["size"], f.get("mtime") or 0.0, None) for f in m.get("files", [])])
+            for f in m.get("files", []):
+                if f.get("hash"):
+                    self.set_file_hash(iid, f["name"], f["hash"], True)
+            status = STATUS_SYNCED if m.get("nas_verified_at") else STATUS_STAGED
+            self.update_ingest(iid, status=status, station=m.get("station"),
+                               started_at=m.get("started_at"), finished_at=m.get("finished_at"),
+                               staging_verified_at=m.get("staging_verified_at"),
+                               nas_verified_at=m.get("nas_verified_at"),
+                               staging_cleared_at=m.get("staging_cleared_at"),
+                               message="manifest から再構築")
+            added += 1
         return added

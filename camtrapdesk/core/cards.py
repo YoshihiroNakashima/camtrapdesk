@@ -107,12 +107,22 @@ def list_media_files(volume: Volume, media_subdirs: list[str], extensions: list[
     warnings: list[str] = []
     small = 0
     found_dir = False
-    for sub in media_subdirs:
+    # 設定のフォルダが1つも無いカードは、DCIM 以下をまとめて探す（カメラの機種が違っても動くように）
+    def _parts(sub: str) -> list[str]:
+        return [p for p in re.split(r"[\\/]+", sub) if p]
+
+    subdirs = [(sub, recursive) for sub in media_subdirs]
+    configured_exists = any(os.path.isdir(volume.join(*_parts(sub))) for sub in media_subdirs if _parts(sub))
+    dcim_itself_configured = any(_parts(sub) == ["DCIM"] for sub in media_subdirs)
+    if not configured_exists and not dcim_itself_configured and os.path.isdir(volume.join("DCIM")):
+        subdirs = [("DCIM", True)]
+        warnings.append("対象フォルダ（" + ", ".join(media_subdirs) + "）が無いので DCIM 以下をすべて探しました")
+    for sub, rec in subdirs:
         base = volume.join(*[p for p in re.split(r"[\\/]+", sub) if p])
         if not os.path.isdir(base):
             continue
         found_dir = True
-        if recursive:
+        if rec:
             walker = os.walk(base)
         else:
             try:

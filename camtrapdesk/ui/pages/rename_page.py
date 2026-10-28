@@ -102,29 +102,46 @@ class RenamePage(QWidget):
         self.sheet_combo.blockSignals(False)
         self.type_combo.blockSignals(True)
         self.type_combo.clear()
-        self.type_combo.addItems(fn.types())
+        for t in fn.types():
+            self.type_combo.addItem(t if t else "（Type列なし）", t)
         default_type = self.ctx.settings.default_type
         if default_type in fn.types():
-            self.type_combo.setCurrentText(default_type)
+            self.type_combo.setCurrentIndex(fn.types().index(default_type))
+        self.type_combo.setEnabled(fn.has_type)
         self.type_combo.blockSignals(False)
         self._type_changed(self.type_combo.currentText())
-        msg = f"読み込みました: {len(fn.rows)} 行、Type: {', '.join(fn.types()[:8])}"
+        msg = f"読み込みました: {len(fn.rows)} 行"
+        if fn.has_type:
+            msg += f"、Type: {', '.join(fn.types()[:8])}"
         if fn.notes:
             msg += "\n" + "\n".join(" - " + n for n in fn.notes)
         self.issues.setPlainText(msg)
         self.apply_btn.setEnabled(False)
 
-    def _type_changed(self, t: str) -> None:
+    def _current_type(self) -> str:
+        d = self.type_combo.currentData()
+        return d if d is not None else self.type_combo.currentText()
+
+    def _current_season(self) -> str:
+        d = self.season_combo.currentData()
+        return d if d is not None else self.season_combo.currentText()
+
+    def _type_changed(self, _t: str) -> None:
         self.season_combo.clear()
-        if self.fieldnote and t:
-            self.season_combo.addItems(self.fieldnote.seasons(t))
-            # 取り込み中のシーズンがあればそれを選ぶ
-            cur = self.ctx.settings.season_folder
-            rule = self.ctx.settings.rule_for(t)
-            for i in range(self.season_combo.count()):
-                if rule.season_prefix + self.season_combo.itemText(i) == cur:
-                    self.season_combo.setCurrentIndex(i)
-                    break
+        if not self.fieldnote:
+            return
+        t = self._current_type()
+        seasons = self.fieldnote.seasons(t)
+        for sn in seasons:
+            self.season_combo.addItem(sn if sn else "（Season列なし: 全行）", sn)
+        self.season_combo.setEnabled(self.fieldnote.has_season)
+        # 取り込み中のシーズンがあればそれを選ぶ
+        cur = self.ctx.settings.season_folder.strip()
+        rule = self.ctx.settings.rule_for(t)
+        for i, sn in enumerate(seasons):
+            if sn and (sn == cur or rule.season_prefix + sn == cur):
+                self.season_combo.setCurrentIndex(i)
+                break
 
     def _root(self) -> tuple[str, str | None]:
         s = self.ctx.settings
@@ -135,9 +152,9 @@ class RenamePage(QWidget):
             self.load_fieldnote()
             if not self.fieldnote:
                 return
-        t = self.type_combo.currentText()
-        season = self.season_combo.currentText()
-        if not t or not season:
+        t = self._current_type()
+        season = self._current_season()
+        if (self.fieldnote.has_type and not t) or (self.fieldnote.has_season and not season):
             QMessageBox.warning(self, "対象", "Type と Season を選んでください。")
             return
         root, nas_root = self._root()

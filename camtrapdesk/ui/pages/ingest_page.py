@@ -29,9 +29,9 @@ class IngestPage(QWidget):
         box = QGroupBox("取り込み先")
         form = QFormLayout(box)
         self.season_edit = QLineEdit(s.season_folder)
-        self.season_edit.setPlaceholderText("例: N260710（Type＋調査日。取り込んだカードはこのフォルダの下に入ります）")
+        self.season_edit.setPlaceholderText("任意。例: 2026-10 や N260710。取り込んだカードはこのフォルダの下に入ります（空なら保存先の直下）")
         self.season_edit.editingFinished.connect(self._season_changed)
-        form.addRow("シーズンフォルダ名", self.season_edit)
+        form.addRow("調査回（シーズン）のフォルダ名", self.season_edit)
         self.dest_label = QLabel()
         self.dest_btn = QPushButton("中継先を変更…")
         self.dest_btn.setToolTip("中継のSSDがいっぱいになったら、別のSSDを繋いでここでそのフォルダを選ぶと、空き待ちのカードがそちらへ続きます")
@@ -58,17 +58,10 @@ class IngestPage(QWidget):
         self.rescan_btn.clicked.connect(lambda: self.ctx.ingest.rescan_now())
         self.clear_btn = QPushButton("完了分を一覧から消す")
         self.clear_btn.clicked.connect(self._clear_done)
-        self.assign_btn = QPushButton("IDの無いカードにIDを付ける…")
-        self.assign_btn.setToolTip("id.txt が無いカードに ID を書き込みます（カードへの唯一の書き込み）")
-        self.assign_btn.clicked.connect(self._assign_ids)
-        self.slots_btn = QPushButton("スロットに名前を付ける…")
-        self.slots_btn.setToolTip("リーダーの差し口ごとに名前（例: 1-A）を付けると、ドライブ文字が変わっても同じ名前で表示されます")
-        self.slots_btn.clicked.connect(self._name_slots)
         self.diag_btn = QPushButton("診断")
         self.diag_btn.setToolTip("Windows が認識している全ボリュームと id.txt の状態を一覧にします")
         self.diag_btn.clicked.connect(self._diagnostics)
-        for w in (self.auto_chk, self.pause_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.assign_btn,
-                  self.slots_btn, self.diag_btn):
+        for w in (self.auto_chk, self.pause_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.diag_btn):
             ops.addWidget(w)
         ops.addStretch(1)
         self.summary_label = QLabel("")
@@ -161,7 +154,7 @@ class IngestPage(QWidget):
     def _ensure_season_dir(self) -> None:
         """保存先にシーズンフォルダを先に作っておく（名前変更画面などから見えるように）。"""
         s = self.ctx.settings
-        if s.dest_root and s.season_folder and os.path.isdir(s.dest_root):
+        if s.dest_root and s.season_folder.strip() and os.path.isdir(s.dest_root):
             try:
                 os.makedirs(os.path.join(s.dest_root, s.season_folder), exist_ok=True)
             except OSError as e:
@@ -181,9 +174,6 @@ class IngestPage(QWidget):
         self.nas_pause.setText("NAS転送を再開" if on else "NAS転送を一時停止")
 
     def _start_all(self) -> None:
-        if not self.ctx.settings.season_folder.strip():
-            QMessageBox.warning(self, "シーズンフォルダ名", "取り込み先のシーズンフォルダ名を入力してください（例: N260710）。")
-            return
         for key, job in list(self.ctx.ingest.jobs.items()):
             if job.state in (I.S_DETECTED, I.S_ERROR, I.S_SKIPPED) and not job.card.problems:
                 self.ctx.ingest.enqueue(key)
@@ -195,100 +185,6 @@ class IngestPage(QWidget):
         self._dirty = True
 
     def _on_job_updated(self, job) -> None:
-        self._dirty = True
-
-    def _assign_ids(self) -> None:
-        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView
-        self.ctx.ingest.rescan_now()
-        others = [(k, v, r) for k, (v, r) in self.ctx.ingest.others.items() if v.kind != "unreadable"]
-        if not others:
-            QMessageBox.information(self, "IDの付与", "id.txt の無いカードは挿さっていません。")
-            return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("IDの無いカードにIDを付ける")
-        dlg.resize(700, 320)
-        lay = QVBoxLayout(dlg)
-        info = QLabel("カードに貼ってある番号などを入力してください（例: 6_650）。空欄のカードには何もしません。"
-                      "\n入力した ID は、そのカードの直下に id.txt として書き込まれます。")
-        info.setWordWrap(True)
-        lay.addWidget(info)
-        tbl = QTableWidget(len(others), 4)
-        tbl.setHorizontalHeaderLabels(["ボリューム", "ラベル", "状態", "付けるID（入力）"])
-        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        for i, (k, v, r) in enumerate(others):
-            for c, val in enumerate([v.display, v.label, r]):
-                it = QTableWidgetItem(val)
-                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                tbl.setItem(i, c, it)
-            tbl.setItem(i, 3, QTableWidgetItem(""))
-        lay.addWidget(tbl)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        lay.addWidget(btns)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        results = []
-        for i, (k, v, r) in enumerate(others):
-            it = tbl.item(i, 3)
-            cid = it.text().strip() if it else ""
-            if not cid:
-                continue
-            ok, msg = self.ctx.ingest.assign_card_id(k, cid)
-            results.append(f"{v.display}: {cid} → {msg}")
-        if results:
-            QMessageBox.information(self, "IDの付与", "\n".join(results))
-        self.ctx.ingest.rescan_now()
-
-    def _name_slots(self) -> None:
-        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView
-        self.ctx.ingest.rescan_now()
-        vols = []
-        for j in self.ctx.ingest.jobs.values():
-            vols.append((j.card.volume, j.card.card_id))
-        for v, _r in self.ctx.ingest.others.values():
-            vols.append((v, ""))
-        if not vols:
-            QMessageBox.information(self, "スロットの名前", "カードが挿さっているスロットがありません。")
-            return
-        vols.sort(key=lambda t: self.ctx.slot_sort_key(t[0]))
-        dlg = QDialog(self)
-        dlg.setWindowTitle("スロットに名前を付ける")
-        dlg.resize(760, 420)
-        lay = QVBoxLayout(dlg)
-        info = QLabel("いま挿さっているカードについて、そのカードが入っている差し口の名前を入力してください（例: 1-A、1-B、…）。"
-                      "カードIDを手がかりに、どのリーダーのどのスロットかを確認して付けます。"
-                      "\n名前はスロット（リーダーの差し口）に残り、カードを入れ替えても、ドライブ文字が変わっても同じ名前で表示されます。"
-                      "リーダーを別のUSBポートに挿し替えると付け直しが必要です。")
-        info.setWordWrap(True)
-        lay.addWidget(info)
-        tbl = QTableWidget(len(vols), 4)
-        tbl.setHorizontalHeaderLabels(["ドライブ", "カードID", "現在の名前", "スロット名（入力）"])
-        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        for i, (v, cid) in enumerate(vols):
-            cur = self.ctx.settings.slot_names.get(v.key, "")
-            for c, val in enumerate([v.display, cid, cur]):
-                it = QTableWidgetItem(val)
-                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                tbl.setItem(i, c, it)
-            tbl.setItem(i, 3, QTableWidgetItem(cur))
-        lay.addWidget(tbl)
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        btns.accepted.connect(dlg.accept)
-        btns.rejected.connect(dlg.reject)
-        lay.addWidget(btns)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        names = dict(self.ctx.settings.slot_names)
-        for i, (v, _cid) in enumerate(vols):
-            it = tbl.item(i, 3)
-            val = it.text().strip() if it else ""
-            if val:
-                names[v.key] = val
-            else:
-                names.pop(v.key, None)
-        self.ctx.settings.slot_names = names
-        self.ctx.save()
         self._dirty = True
 
     def _diagnostics(self) -> None:
@@ -377,6 +273,7 @@ class IngestPage(QWidget):
             else:
                 state, color = "IDなし", COLORS["warn"]
                 n_noid += 1
+                reason = reason + "。左の「カードにIDを付ける」で番号を付けてください"
             set_row(self.table, r, [self.ctx.slot_label(v), "", "", "", state, "", f"{v.label}: {reason}"], color)
         extra = ""
         if n_noid:

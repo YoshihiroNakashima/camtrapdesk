@@ -28,19 +28,21 @@ def config_dir() -> Path:
 
 
 def _default_fieldnote_path() -> str:
-    if sys.platform == "win32":
-        return r"C:\Users\25069\Box\nakashima.yoshihiro\森林動物共有\14_最新のカメラデータ\野帳写し.xlsx"
-    if sys.platform == "darwin":
-        return str(Path.home() / "Library/CloudStorage/Box-Box/nakashima.yoshihiro/森林動物共有/14_最新のカメラデータ/野帳写し.xlsx")
-    return ""
+    return ""   # 野帳の場所は「地点名に変更」画面で選ぶ
 
 
 @dataclass
 class TypeRule:
-    """野帳の Type ごとの、Season / Station のフォルダ名整形ルール。"""
-    season_prefix: str = "N"
-    station_prefix: str = "BSN"
-    station_pad: int = 4
+    """野帳の Type ごとの、Season / Station のフォルダ名整形ルール。
+    既定（接頭辞なし・ゼロ埋めなし）では野帳の値をそのままフォルダ名にする。
+    例: Type N に season_prefix="N", station_prefix="BSN", station_pad=4 を設定すると 260710 → N260710、482 → BSN0482。"""
+    season_prefix: str = ""
+    station_prefix: str = ""
+    station_pad: int = 0
+
+    @property
+    def is_plain(self) -> bool:
+        return not self.season_prefix and not self.station_prefix and not self.station_pad
 
 
 @dataclass
@@ -74,21 +76,18 @@ class Settings:
     col_type: str = "Type"
     col_retrieval_sd: str = "RetrievalSD"
     card_id_match_tail_number: bool = True   # id.txt の "6_650" と野帳の 650 を同一視する
-    default_type: str = "N"
-    type_rules: dict[str, TypeRule] = field(default_factory=lambda: {"N": TypeRule()})
+    default_type: str = ""                   # 「地点名に変更」で最初に選ぶ Type（空なら野帳で最も多いもの）
+    type_rules: dict[str, TypeRule] = field(default_factory=dict)   # Type ごとの整形ルール（無ければそのまま）
     # --- ボリューム検出 ---
     scan_roots: list[str] = field(default_factory=list)   # 追加の検索ルート（テスト・Linux用）
     exclude_volumes: list[str] = field(default_factory=list)
-    volume_label_prefix: str = "BRW_"
+    volume_label_prefix: str = ""
     slot_names: dict[str, str] = field(default_factory=dict)   # ボリューム識別子（リーダーのスロット）→ 人が付けた名前
 
     # ------------------------------------------------------------------
     def rule_for(self, type_code: str) -> TypeRule:
-        r = self.type_rules.get(type_code)
-        if r is None:
-            # 未設定の Type は、Type 名を接頭辞にした無難な規則
-            r = TypeRule(season_prefix=type_code, station_prefix=type_code, station_pad=4)
-        return r
+        """Type の整形ルール。未設定なら野帳の値をそのまま使う。"""
+        return self.type_rules.get(type_code) or self.type_rules.get("*") or TypeRule()
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

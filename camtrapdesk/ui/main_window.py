@@ -10,11 +10,12 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QListWidgetItem
 from .. import __version__
 from .context import AppContext
 from .pages.clear_page import ClearPage
+from .pages.id_page import IdPage
 from .pages.ingest_page import IngestPage
 from .pages.ledger_page import LedgerPage
 from .pages.rename_page import RenamePage
 from .pages.settings_page import SettingsPage
-from .pages.volume_page import VolumePage
+from .pages.slot_page import SlotPage
 
 
 def _app_icon() -> QIcon:
@@ -33,18 +34,6 @@ def _app_icon() -> QIcon:
     return QIcon(pm)
 
 
-class PlaceholderPage(QWidget):
-    def __init__(self, title: str, text: str, parent=None):
-        super().__init__(parent)
-        lay = QVBoxLayout(self)
-        h = QLabel(f"<h2>{title}</h2>")
-        t = QLabel(text)
-        t.setWordWrap(True)
-        lay.addWidget(h)
-        lay.addWidget(t)
-        lay.addStretch(1)
-
-
 class MainWindow(QMainWindow):
     def __init__(self, ctx: AppContext):
         super().__init__()
@@ -57,35 +46,27 @@ class MainWindow(QMainWindow):
         lay = QHBoxLayout(central)
         lay.setContentsMargins(0, 0, 0, 0)
         self.nav = QListWidget()
-        self.nav.setFixedWidth(190)
+        self.nav.setFixedWidth(230)
         self.nav.setIconSize(QSize(16, 16))
         self.stack = QStackedWidget()
         lay.addWidget(self.nav)
         lay.addWidget(self.stack, 1)
         self.setCentralWidget(central)
 
-        self._add_header("SDカード")
-        self._add_page("取り込み", IngestPage(ctx))
-        self._add_page("名前変更（地点名へ）", RenamePage(ctx))
-        self._add_page("削除", ClearPage(ctx))
-        self._add_page("ボリューム名", VolumePage(ctx))
-        self._add_page("台帳", LedgerPage(ctx))
-        self._add_header("データ管理")
-        self._add_page("PRM_N の読み込み", PlaceholderPage(
-            "PRM_N の読み込み", "次の段階で実装します（read_bs: DateTimeIsOk / DeleteFlag の絞り込み、Season の整形）。"))
-        self._add_page("種名修正の反映", PlaceholderPage(
-            "種名修正の反映", "次の段階で実装します（apply_species_corrections）。"))
-        self._add_page("時刻チェック", PlaceholderPage(
-            "時刻チェック", "次の段階で実装します（time_correct_ff / time_correct_order）。"))
-        self._add_page("調査努力量", PlaceholderPage(
-            "調査努力量", "次の段階で実装します（plot_survey_effort）。"))
-        self._add_page("動画サンプリング", PlaceholderPage(
-            "動画サンプリング", "次の段階で実装します（sample_and_copy_videos / add_videos / collapse_strata）。"))
-        self._add_header("")
+        self._add_header("最初に一度だけ")
+        self._add_page("カードにIDを付ける", IdPage(ctx), "新しいSDカードに番号（id.txt）を書き込みます")
+        self._add_header("リーダーを挿し替えたら")
+        self._add_page("スロットに名前を付ける", SlotPage(ctx), "リーダーの差し口に名前を付けて、ドライブ文字に頼らず見分けます")
+        self._add_header("移行のたびに（この順で）")
+        self._add_page("1. 取り込み", IngestPage(ctx), "挿したカードを保存先にコピーして検証し、NASへ転送します")
+        self._add_page("2. 地点名に変更", RenamePage(ctx), "野帳の回収SD列をもとに、カードIDのフォルダ名を地点名にします")
+        self._add_page("3. カードを消す", ClearPage(ctx), "保存先（NAS）と照合できたカードの動画だけを削除します")
+        self._add_header("記録・設定")
+        self._add_page("台帳", LedgerPage(ctx), "取り込みの記録")
         self._add_page("設定", SettingsPage(ctx))
 
         self.nav.currentRowChanged.connect(self._nav_changed)
-        self.nav.setCurrentRow(1)
+        self.nav.setCurrentRow(self.page_index(IngestPage))
 
         self.status_nas = QLabel("")
         self.statusBar().addPermanentWidget(self.status_nas)
@@ -98,6 +79,12 @@ class MainWindow(QMainWindow):
             self.tray.show()
 
     def _add_header(self, text: str) -> None:
+        if self.nav.count():
+            gap = QListWidgetItem("")
+            gap.setFlags(Qt.ItemFlag.NoItemFlags)
+            gap.setSizeHint(QSize(0, 10))
+            self.nav.addItem(gap)
+            self.stack.addWidget(QWidget())
         it = QListWidgetItem(text)
         it.setFlags(Qt.ItemFlag.NoItemFlags)
         f = it.font()
@@ -106,10 +93,25 @@ class MainWindow(QMainWindow):
         self.nav.addItem(it)
         self.stack.addWidget(QWidget())
 
-    def _add_page(self, text: str, page: QWidget) -> None:
+    def _add_page(self, text: str, page: QWidget, tooltip: str = "") -> None:
         it = QListWidgetItem("   " + text)
+        if tooltip:
+            it.setToolTip(tooltip)
         self.nav.addItem(it)
         self.stack.addWidget(page)
+
+    def page_index(self, cls: type) -> int:
+        """ページのクラスからナビゲーションの行番号を得る。"""
+        for i in range(self.stack.count()):
+            if isinstance(self.stack.widget(i), cls):
+                return i
+        return -1
+
+    def page(self, cls: type) -> QWidget:
+        return self.stack.widget(self.page_index(cls))
+
+    def show_page(self, cls: type) -> None:
+        self.nav.setCurrentRow(self.page_index(cls))
 
     def _nav_changed(self, row: int) -> None:
         if row >= 0:

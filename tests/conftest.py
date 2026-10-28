@@ -3,8 +3,15 @@ import random
 
 import pytest
 
-from camtrapdesk.config import Settings
+from camtrapdesk.config import Settings, TypeRule
 from camtrapdesk.core.ledger import Ledger
+
+# 中島研の野帳の整形ルール（Type N → N260710 / BSN0482）。既定は「そのまま」なので、テストでは明示する
+NAKASHIMA_RULES = {"N": TypeRule("N", "BSN", 4)}
+
+
+def nakashima_settings(**kw) -> Settings:
+    return Settings(type_rules=dict(NAKASHIMA_RULES), default_type="N", **kw)
 
 
 def make_card(cards_dir, card_id, n_files=3, size=200_000, subdir="DCIM/100_BTCF", seed=0):
@@ -29,7 +36,7 @@ def env(tmp_path):
     dest = tmp_path / "staging"
     nas = tmp_path / "nas"
     cards.mkdir(); dest.mkdir(); nas.mkdir()
-    s = Settings(dest_root=str(dest), nas_root=str(nas), season_folder="N260710",
-                 scan_roots=[str(cards)], concurrency=2, poll_interval_sec=0.2)
+    s = nakashima_settings(dest_root=str(dest), nas_root=str(nas), season_folder="N260710",
+                           scan_roots=[str(cards)], concurrency=2, poll_interval_sec=0.2)
     ledger = Ledger(str(tmp_path / "ledger.sqlite"))
     return {"tmp": tmp_path, "cards": cards, "dest": dest, "nas": nas, "settings": s, "ledger": ledger}

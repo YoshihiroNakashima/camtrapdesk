@@ -363,9 +363,6 @@ class IngestManager:
         s = self.get_settings()
         card = job.card
         cid = card.card_id
-        if not s.season_folder.strip():
-            self._set(job, S_ERROR, "取り込み先のシーズンフォルダ名が未設定です（例: N260710）")
-            return
         if not s.dest_root:
             self._set(job, S_ERROR, "保存先（中継先）が未設定です。「設定」で指定してください")
             return
@@ -439,7 +436,7 @@ class IngestManager:
                                               card.n_files, card.total_bytes, dest_root_id=root_id)
         job.ingest_id = ingest_id
         self.ledger.add_files(ingest_id, [(f.name, f.size, f.mtime, f.src_path) for f in card.files])
-        self.ledger.event("ingest_start", f"{season_folder}/{dir_name} {card.n_files} files", cid)
+        self.ledger.event("ingest_start", f"{os.path.join(season_folder, dir_name)} {card.n_files} files", cid)
         self._set(job, S_COPYING, f"コピー中 0/{card.n_files}")
         self.on_log(f"[{cid}] コピー開始 → {dest_dir}（{card.n_files}ファイル, {card.total_bytes/1e9:.2f} GB）")
 

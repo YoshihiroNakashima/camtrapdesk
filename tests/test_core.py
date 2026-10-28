@@ -14,7 +14,7 @@ from camtrapdesk.core.nas_sync import NasSyncer
 from camtrapdesk.core.rename import A_BLOCKED, A_RENAME, A_UNMAPPED, apply_plan, build_plan
 from camtrapdesk.core.volumes import list_volumes
 
-from conftest import make_card
+from conftest import make_card, nakashima_settings
 
 
 def run_ingest(env, timeout=30):
@@ -215,7 +215,7 @@ def test_real_fieldnote_if_present():
     path = "/mnt/user-data/uploads/14_最新のカメラデータ/野帳写し.xlsx"
     if not os.path.exists(path):
         return
-    s = Settings()
+    s = nakashima_settings()
     fn = load_fieldnote(path, s)
     assert "N" in fn.types()
     m = build_mapping(fn, "N", "260710", s)
@@ -234,7 +234,7 @@ def test_fieldnote_tolerant_headers(tmp_path):
     ws.append(["2026/10/17", None, "N261016", "継続", 690, "N", 269, 263])
     ws.append(["2026/10/17", None, "N261016", "継続", 617, "W", 640, 315])
     p = tmp_path / "dna.xlsx"; wb.save(p)
-    s = Settings()
+    s = nakashima_settings()
     fn = load_fieldnote(str(p), s)
     assert any("Statuion" in n for n in fn.notes)
     assert fn.seasons("N") == ["N261016"]
@@ -243,7 +243,7 @@ def test_fieldnote_tolerant_headers(tmp_path):
     assert [e.station_folder for e in m.entries] == ["BSN0690"]
     assert m.entries[0].card_id == "263"
     # 列が本当に無いときは、ファイルの列一覧を含むエラー
-    s2 = Settings(col_retrieval_sd="KaishuSD")
+    s2 = nakashima_settings(col_retrieval_sd="KaishuSD")
     try:
         load_fieldnote(str(p), s2)
         assert False
@@ -487,3 +487,60 @@ def test_nas_sync_finds_staging_after_drive_letter_change(env, monkeypatch):
     assert ing.status == L.STATUS_SYNCED
     assert ing.dest_root == str(moved)          # 台帳のパスも直っている
     assert (env["nas"] / "N260710" / "264" / "IMG_0001.MP4").is_file()
+
+
+def test_generic_fieldnote_without_season_and_type(env):
+    """Season/Type 列が無い野帳、整形ルール無し、シーズンフォルダ無しでも一通り動く（他の研究室向けの既定）。"""
+    from openpyxl import Workbook
+    s = Settings(dest_root=str(env["dest"]), nas_root=str(env["nas"]), season_folder="",
+                 scan_roots=[str(env["cards"])], concurrency=2, poll_interval_sec=0.2)
+    assert s.rule_for("").is_plain and s.rule_for("anything").is_plain
+    env["settings"] = s
+    ledger = env["ledger"]
+    make_card(env["cards"], "12", n_files=2)
+    mgr, logs = run_ingest(env)
+    assert {j.state for j in mgr.jobs.values()} == {S_DONE}, logs
+    assert (env["dest"] / "12" / "IMG_0000.MP4").is_file()     # シーズンフォルダ無し → 保存先の直下
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    while ledger.pending_nas():
+        syncer._tick()
+    assert (env["nas"] / "12" / "IMG_0000.MP4").is_file()
+
+    wb = Workbook(); ws = wb.active
+    ws.append(["Station", "RetrievalSD", "Remarks"])
+    ws.append(["Ridge-03", 12, ""])
+    ws.append(["Creek 7", 99, ""])
+    p = env["tmp"] / "simple.xlsx"; wb.save(p)
+    fn = load_fieldnote(str(p), s)
+    assert not fn.has_season and not fn.has_type
+    assert fn.types() == [""] and fn.seasons("") == [""]
+    assert any("Season 列が無い" in n for n in fn.notes)
+    m = build_mapping(fn, "", "", s)
+    assert m.season_folder == "" and [e.station_folder for e in m.entries] == ["Ridge-03", "Creek 7"]
+    plan = build_plan(str(env["dest"]), str(env["nas"]), m, ledger)
+    acts = {i.card_id: i.action for i in plan.items}
+    assert acts["12"] == A_RENAME
+    from camtrapdesk.core.rename import A_MISSING
+    assert acts["99"] == A_MISSING
+    n, errs = apply_plan(plan, ledger, log=lambda m: None)
+    assert n == 1 and not errs, errs
+    assert (env["dest"] / "Ridge-03").is_dir() and (env["nas"] / "Ridge-03").is_dir()
+    # 台帳を消して manifest から再構築できる（シーズンフォルダ無しの配置）
+    ledger2 = L.Ledger(str(env["tmp"] / "ledger2.sqlite"))
+    assert ledger2.rebuild_from_manifests(str(env["dest"]), str(env["nas"])) == 1
+    assert ledger2.find_by_dir("", "Ridge-03").station == "Ridge-03"
+
+
+def test_default_settings_are_not_user_specific():
+    s = Settings()
+    assert s.fieldnote_path == "" and s.type_rules == {} and s.default_type == "" and s.volume_label_prefix == ""
+    assert format_station(" 0482 ", TypeRule()) == "0482"   # ルール無しならそのまま
+
+
+def test_other_camera_folder_falls_back_to_dcim(env):
+    """設定の対象フォルダ（DCIM/100_BTCF）が無い別機種のカードでも、DCIM 以下を探して取り込める。"""
+    make_card(env["cards"], "77", n_files=2, subdir="DCIM/101RECNX")
+    vols = list_volumes(scan_roots=[str(env["cards"])])
+    found = detect_cards(vols, "id.txt", ["DCIM/100_BTCF"], ["mp4"], False, 1024)
+    assert len(found) == 1 and found[0].n_files == 2 and not found[0].problems
+    assert any("DCIM 以下" in w for w in found[0].warnings)

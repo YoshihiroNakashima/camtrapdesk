@@ -32,7 +32,7 @@ class SettingsPage(QWidget):
         self.season_folder = QLineEdit(s.season_folder)
         f1.addRow("中継先（または最終保存先）", self.dest_root)
         f1.addRow("NASの最終保存先", self.nas_root)
-        f1.addRow("現在のシーズンフォルダ名", self.season_folder)
+        f1.addRow("調査回（シーズン）のフォルダ名（任意。空なら保存先の直下）", self.season_folder)
         lay.addWidget(g1)
 
         # --- カード内の対象 ---
@@ -96,7 +96,7 @@ class SettingsPage(QWidget):
         lay.addWidget(g3)
 
         # --- 野帳 ---
-        g4 = QGroupBox("野帳（ファイルは「名前変更」画面で選びます）")
+        g4 = QGroupBox("野帳（ファイルは「2. 地点名に変更」画面で選びます）")
         f4 = QFormLayout(g4)
         self.sheet = QLineEdit(s.fieldnote_sheet)
         self.sheet.setPlaceholderText("空なら最初のシート")
@@ -114,8 +114,8 @@ class SettingsPage(QWidget):
                        ("回収SD", self.col_ret)):
             cols.addWidget(QLabel(lbl))
             cols.addWidget(w)
-        f4.addRow("列名（大文字小文字や綴りの揺れは自動で読み替え）", cols)
-        f4.addRow("既定の Type", self.default_type)
+        f4.addRow("列名（Station と 回収SD は必須。Season と Type は野帳に無くてもよい。綴りの揺れは自動で読み替え）", cols)
+        f4.addRow("最初に選ぶ Type（任意）", self.default_type)
         self.rules = QTableWidget(0, 4)
         self.rules.setHorizontalHeaderLabels(["Type", "Seasonの接頭辞", "Stationの接頭辞", "ゼロ埋め桁数"])
         self.rules.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -129,7 +129,7 @@ class SettingsPage(QWidget):
         btns.addWidget(add)
         btns.addWidget(rm)
         btns.addStretch(1)
-        f4.addRow("フォルダ名の整形ルール", self.rules)
+        f4.addRow("フォルダ名の整形ルール（任意。無ければ野帳の値をそのまま使う。例: Type N に N / BSN / 4 → N260710 / BSN0482）", self.rules)
         f4.addRow("", btns)
         lay.addWidget(g4)
 
