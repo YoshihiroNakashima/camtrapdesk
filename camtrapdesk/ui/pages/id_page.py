@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
@@ -50,9 +50,35 @@ class IdPage(QWidget):
         self.table = make_table(["スロット", "ボリューム名", "現在のID", "状態", "付けるID（ここに入力）", "結果"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.AllEditTriggers)
         root.addWidget(self.table, 1)
+        # 画面を開いている間は、カードの抜き差しに合わせて一覧を自動で更新する（入力途中の ID は残す）
+        self.timer = QTimer(self)
+        self.timer.setInterval(1500)
+        self.timer.timeout.connect(lambda: self.scan(auto=True))
+        self._keys: tuple = ()
 
-    def scan(self) -> None:
-        self.ctx.ingest.rescan_now()
+    def showEvent(self, e) -> None:  # noqa: N802
+        super().showEvent(e)
+        self.scan(auto=True)
+        self.timer.start()
+
+    def hideEvent(self, e) -> None:  # noqa: N802
+        self.timer.stop()
+        super().hideEvent(e)
+
+    def _pending_edits(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for i, (key, _v, cid, _state) in enumerate(self.rows):
+            if cid:
+                continue
+            it = self.table.item(i, self.COL_INPUT)
+            if it is not None and it.text().strip():
+                out[key] = it.text()
+        return out
+
+    def scan(self, auto: bool = False) -> None:
+        """挿さっているカードを一覧にする。auto=True は自動更新（抜き差しが無ければ何もしない）。"""
+        if not auto:
+            self.ctx.ingest.rescan_now()
         rows: list[tuple[str, object, str, str]] = []
         for key, job in self.ctx.ingest.jobs.items():
             rows.append((key, job.card.volume, job.card.card_id, "ID あり"))
@@ -66,17 +92,23 @@ class IdPage(QWidget):
                 state = "ID なし"
             rows.append((key, v, "", state))
         rows.sort(key=lambda r: self.ctx.slot_sort_key(r[1]))
+        keys = tuple((k, cid, state) for k, _v, cid, state in rows)
+        if auto and keys == self._keys:
+            return
+        edits = self._pending_edits()
+        self._keys = keys
         self.rows = rows
         self.table.setRowCount(len(rows))
         for i, (key, v, cid, state) in enumerate(rows):
             color = COLORS["ok"] if cid else (COLORS["err"] if v.kind == "unreadable" else COLORS["warn"])
-            set_row(self.table, i, [self.ctx.slot_label(v), v.label, cid, state, suggested.get(key, "") if not cid else "", ""], color)
+            prefill = "" if cid else edits.get(key, suggested.get(key, ""))
+            set_row(self.table, i, [self.ctx.slot_label(v), v.label, cid, state, prefill, ""], color)
             it = self.table.item(i, self.COL_INPUT)
             if cid or v.kind == "unreadable":
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
             else:
                 it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
-        if not rows:
+        if not rows and not auto:
             QMessageBox.information(self, "カードにIDを付ける", "カードが挿さっていません。")
 
     def apply(self) -> None:
@@ -122,6 +154,7 @@ class IdPage(QWidget):
                 ok, msg = set_volume_label(v, label)
                 self.table.setItem(i, 5, QTableWidgetItem(f"ボリューム名 → {label}: {msg}"))
         self.ctx.ingest.rescan_now()
+        self._keys = ()
         if todo:
             QMessageBox.information(self, "カードにIDを付ける",
                                     f"{n_written} 枚に ID を書き込みました。「取り込み」画面に戻ると、挿したままで取り込みが始まります。")

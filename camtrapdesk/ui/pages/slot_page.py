@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QAbstractItemView, QHBoxLayout, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget
 
 from ..context import AppContext
@@ -45,27 +45,57 @@ class SlotPage(QWidget):
         self.count_label = QLabel("")
         root.addWidget(self.count_label)
         self._refresh_count()
+        # 画面を開いている間は、カードの抜き差しに合わせて一覧を自動で更新する（入力途中の名前は残す）
+        self.timer = QTimer(self)
+        self.timer.setInterval(1500)
+        self.timer.timeout.connect(lambda: self.scan(auto=True))
+        self._keys: tuple = ()
+
+    def showEvent(self, e) -> None:  # noqa: N802
+        super().showEvent(e)
+        self.scan(auto=True)
+        self.timer.start()
+
+    def hideEvent(self, e) -> None:  # noqa: N802
+        self.timer.stop()
+        super().hideEvent(e)
+
+    def _pending_edits(self) -> dict[str, str]:
+        """表に入力中の名前（ボリュームの識別子 → 文字列）。"""
+        out: dict[str, str] = {}
+        for i, (v, _cid) in enumerate(self.vols):
+            it = self.table.item(i, self.COL_INPUT)
+            if it is not None:
+                out[v.key] = it.text()
+        return out
 
     def _refresh_count(self) -> None:
         n = len(self.ctx.settings.slot_names)
         self.count_label.setText(f"保存されているスロット名: {n} 個")
 
-    def scan(self) -> None:
-        self.ctx.ingest.rescan_now()
+    def scan(self, auto: bool = False) -> None:
+        """挿さっているカードを一覧にする。auto=True は自動更新（抜き差しが無ければ何もしない）。"""
+        if not auto:
+            self.ctx.ingest.rescan_now()
         vols: list[tuple[object, str]] = []
         for j in self.ctx.ingest.jobs.values():
             vols.append((j.card.volume, j.card.card_id))
         for v, _r in self.ctx.ingest.others.values():
             vols.append((v, ""))
         vols.sort(key=lambda t: self.ctx.slot_sort_key(t[0]))
+        keys = tuple((v.key, cid) for v, cid in vols)
+        if auto and keys == self._keys:
+            return
+        edits = self._pending_edits()
+        self._keys = keys
         self.vols = vols
         self.table.setRowCount(len(vols))
         for i, (v, cid) in enumerate(vols):
             cur = self.ctx.settings.slot_names.get(v.key, "")
-            set_row(self.table, i, [v.display, cid, cur, cur], COLORS["ok"] if cur else None)
+            set_row(self.table, i, [v.display, cid, cur, edits.get(v.key, cur)], COLORS["ok"] if cur else None)
             it = self.table.item(i, self.COL_INPUT)
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
-        if not vols:
+        if not vols and not auto:
             QMessageBox.information(self, "スロットに名前を付ける", "カードが挿さっているスロットがありません。各スロットにカードを1枚ずつ挿してください。")
 
     def apply(self) -> None:
