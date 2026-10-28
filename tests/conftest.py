@@ -11,6 +11,7 @@ def nakashima_settings(**kw) -> Settings:
     """中島研の付け方（接頭辞 BSN、4桁。既定と同じ）を明示した設定。"""
     kw.setdefault("station_prefix", "BSN")
     kw.setdefault("station_digits", 4)
+    kw.setdefault("min_free_gb", 0)    # CI の実行環境は空きが小さいことがあるので、テストでは空き待ちにしない
     return Settings(**kw)
 
 

@@ -502,7 +502,7 @@ def test_generic_fieldnote_without_season_and_type(env):
     """Season/Type 列が無い野帳、整形ルール無し、シーズンフォルダ無しでも一通り動く（他の研究室向けの既定）。"""
     from openpyxl import Workbook
     s = Settings(dest_root=str(env["dest"]), nas_root=str(env["nas"]), season_folder="",
-                 scan_roots=[str(env["cards"])], concurrency=2, poll_interval_sec=0.2)
+                 scan_roots=[str(env["cards"])], concurrency=2, poll_interval_sec=0.2, min_free_gb=0)
     s.station_prefix, s.station_digits = "", 0    # 接頭辞もゼロ埋めも無し → 野帳の値そのまま
     env["settings"] = s
     ledger = env["ledger"]
