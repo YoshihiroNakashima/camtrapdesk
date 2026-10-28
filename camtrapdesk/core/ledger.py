@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS ingests (
     nas_verified_at TEXT,
     cleared_at TEXT,
     staging_cleared_at TEXT,
-    dest_root_id TEXT
+    dest_root_id TEXT,
+    convert_pending INTEGER DEFAULT 0,
+    convert_done_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_ingests_card ON ingests(card_id_norm);
 CREATE TABLE IF NOT EXISTS files (
@@ -59,7 +61,11 @@ CREATE TABLE IF NOT EXISTS files (
     src_path TEXT,
     staging_ok INTEGER DEFAULT 0,
     nas_ok INTEGER DEFAULT 0,
-    deleted_at TEXT
+    deleted_at TEXT,
+    src_name TEXT,
+    src_size INTEGER,
+    src_hash TEXT,
+    converted INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_files_ingest ON files(ingest_id);
 CREATE TABLE IF NOT EXISTS events (
@@ -99,6 +105,8 @@ class Ingest:
     cleared_at: str | None
     staging_cleared_at: str | None = None   # NAS検証後に中継のコピーを消した時刻
     dest_root_id: str | None = None         # 中継先フォルダの目印ID（ドライブ文字が変わっても探せる）
+    convert_pending: int = 0                # mp4 への変換がまだのファイル数（0 なら変換不要または完了）
+    convert_done_at: str | None = None
 
     @property
     def staging_dir(self) -> str:
@@ -123,6 +131,22 @@ class FileRec:
     staging_ok: bool
     nas_ok: bool
     deleted_at: str | None
+    src_name: str | None = None     # カード上の元のファイル名（変換すると name と異なる）
+    src_size: int | None = None     # カード上の元のサイズ
+    src_hash: str | None = None     # カード上の元ファイルのハッシュ
+    converted: bool = False         # mp4 に変換済み
+
+    @property
+    def card_name(self) -> str:
+        return self.src_name or self.name
+
+    @property
+    def card_size(self) -> int:
+        return self.src_size if self.src_size is not None else self.size
+
+    @property
+    def card_hash(self) -> str | None:
+        return self.src_hash or (None if self.converted else self.hash)
 
 
 class Ledger:
@@ -141,6 +165,15 @@ class Ledger:
             c.execute("ALTER TABLE ingests ADD COLUMN staging_cleared_at TEXT")
         if "dest_root_id" not in cols:
             c.execute("ALTER TABLE ingests ADD COLUMN dest_root_id TEXT")
+        if "convert_pending" not in cols:
+            c.execute("ALTER TABLE ingests ADD COLUMN convert_pending INTEGER DEFAULT 0")
+            c.execute("ALTER TABLE ingests ADD COLUMN convert_done_at TEXT")
+        fcols = {r["name"] for r in c.execute("PRAGMA table_info(files)")}
+        if "src_name" not in fcols:
+            c.execute("ALTER TABLE files ADD COLUMN src_name TEXT")
+            c.execute("ALTER TABLE files ADD COLUMN src_size INTEGER")
+            c.execute("ALTER TABLE files ADD COLUMN src_hash TEXT")
+            c.execute("ALTER TABLE files ADD COLUMN converted INTEGER DEFAULT 0")
 
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
@@ -216,7 +249,7 @@ class Ledger:
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM ingests WHERE status = ? AND nas_root IS NOT NULL AND nas_root != ''"
-                " AND nas_verified_at IS NULL AND cleared_at IS NULL ORDER BY id", (STATUS_STAGED,))
+                " AND nas_verified_at IS NULL AND cleared_at IS NULL AND convert_pending = 0 ORDER BY id", (STATUS_STAGED,))
             return [self._row_to_ingest(r) for r in rows]
 
     def synced_with_staging_copy(self) -> list[Ingest]:
@@ -241,10 +274,30 @@ class Ledger:
 
     # ------------------------------------------------------------- files
     def add_files(self, ingest_id: int, rows: Iterable[tuple[str, int, float, str | None]]) -> None:
-        """rows: (name, size, mtime, src_path)"""
+        """rows: (name, size, mtime, src_path)。src_name/src_size にもカード上の名前とサイズを入れておく。"""
         with self._lock, self._conn() as c:
-            c.executemany("INSERT INTO files(ingest_id, name, size, mtime, src_path) VALUES (?,?,?,?,?)",
-                          [(ingest_id, n, s, m, p) for n, s, m, p in rows])
+            c.executemany("INSERT INTO files(ingest_id, name, size, mtime, src_path, src_name, src_size) VALUES (?,?,?,?,?,?,?)",
+                          [(ingest_id, n, s, m, p, n, s) for n, s, m, p in rows])
+
+    def set_file_converted(self, ingest_id: int, src_name: str, new_name: str, new_size: int, new_hash: str,
+                           src_hash: str | None) -> None:
+        """mp4 への変換が終わったファイル: name/size/hash を変換後のものに置き換え、元の情報は src_* に残す。"""
+        with self._lock, self._conn() as c:
+            c.execute("UPDATE files SET name = ?, size = ?, hash = ?, staging_ok = 1, converted = 1, src_hash = COALESCE(?, src_hash)"
+                      " WHERE ingest_id = ? AND name = ?",
+                      (new_name, new_size, new_hash, src_hash, ingest_id, src_name))
+
+    def set_convert_pending(self, ingest_id: int, n: int) -> None:
+        with self._lock, self._conn() as c:
+            c.execute("UPDATE ingests SET convert_pending = ?, convert_done_at = CASE WHEN ? = 0 THEN COALESCE(convert_done_at, ?) ELSE NULL END"
+                      " WHERE id = ?", (n, n, now_iso(), ingest_id))
+
+    def pending_convert(self) -> list[Ingest]:
+        """中継先で検証済みで、mp4 への変換が残っているもの。"""
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM ingests WHERE status IN (?, ?) AND convert_pending > 0 AND cleared_at IS NULL ORDER BY id",
+                             (STATUS_STAGED, STATUS_SYNCED))
+            return [self._row_to_ingest(r) for r in rows]
 
     def set_file_hash(self, ingest_id: int, name: str, hash_: str, staging_ok: bool) -> None:
         with self._lock, self._conn() as c:
@@ -257,10 +310,11 @@ class Ledger:
                       (1 if ok else 0, ingest_id, name))
 
     def mark_files_deleted(self, ingest_id: int, names: Iterable[str]) -> None:
+        """names はカード上のファイル名（変換済みなら src_name と一致する）。"""
         ts = now_iso()
         with self._lock, self._conn() as c:
-            c.executemany("UPDATE files SET deleted_at = ? WHERE ingest_id = ? AND name = ?",
-                          [(ts, ingest_id, n) for n in names])
+            c.executemany("UPDATE files SET deleted_at = ? WHERE ingest_id = ? AND (name = ? OR src_name = ?)",
+                          [(ts, ingest_id, n, n) for n in names])
 
     def files_for(self, ingest_id: int) -> list[FileRec]:
         with self._conn() as c:
@@ -268,7 +322,8 @@ class Ledger:
             return [FileRec(id=r["id"], ingest_id=r["ingest_id"], name=r["name"], size=r["size"],
                             mtime=r["mtime"], hash=r["hash"], src_path=r["src_path"],
                             staging_ok=bool(r["staging_ok"]), nas_ok=bool(r["nas_ok"]),
-                            deleted_at=r["deleted_at"]) for r in rows]
+                            deleted_at=r["deleted_at"], src_name=r["src_name"], src_size=r["src_size"],
+                            src_hash=r["src_hash"], converted=bool(r["converted"])) for r in rows]
 
     def renormalize_card_ids(self) -> int:
         """照合ルールの変更後に、全レコードの card_id_norm を計算し直す。"""
@@ -306,7 +361,10 @@ class Ledger:
             "dest_root_id": ing.dest_root_id,
             "n_files": len(files),
             "total_bytes": sum(f.size for f in files),
-            "files": [{"name": f.name, "size": f.size, "mtime": f.mtime, "hash": f.hash} for f in files],
+            "convert_done_at": ing.convert_done_at,
+            "files": [{"name": f.name, "size": f.size, "mtime": f.mtime, "hash": f.hash,
+                       **({"src_name": f.src_name, "src_size": f.src_size, "src_hash": f.src_hash, "converted": True}
+                          if f.converted else {})} for f in files],
         }
         if extra:
             data.update(extra)
@@ -360,12 +418,18 @@ class Ledger:
             for f in m.get("files", []):
                 if f.get("hash"):
                     self.set_file_hash(iid, f["name"], f["hash"], True)
+                if f.get("converted"):
+                    with self._lock, self._conn() as c:
+                        c.execute("UPDATE files SET src_name = ?, src_size = ?, src_hash = ?, converted = 1"
+                                  " WHERE ingest_id = ? AND name = ?",
+                                  (f.get("src_name"), f.get("src_size"), f.get("src_hash"), iid, f["name"]))
             status = STATUS_SYNCED if m.get("nas_verified_at") else STATUS_STAGED
             self.update_ingest(iid, status=status, station=m.get("station"),
                                started_at=m.get("started_at"), finished_at=m.get("finished_at"),
                                staging_verified_at=m.get("staging_verified_at"),
                                nas_verified_at=m.get("nas_verified_at"),
                                staging_cleared_at=m.get("staging_cleared_at"),
+                               convert_done_at=m.get("convert_done_at"),
                                message="manifest から再構築")
             added += 1
         return added

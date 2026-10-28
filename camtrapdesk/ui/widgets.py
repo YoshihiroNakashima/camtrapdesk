@@ -19,9 +19,11 @@ def human_size(n: float) -> str:
 class PathRow(QWidget):
     """パス入力欄＋「参照」ボタン。"""
 
-    def __init__(self, text: str = "", mode: str = "dir", parent=None, placeholder: str = ""):
+    def __init__(self, text: str = "", mode: str = "dir", parent=None, placeholder: str = "",
+                 file_filter: str = "Excel (*.xlsx *.xlsm);;すべて (*)"):
         super().__init__(parent)
         self.mode = mode
+        self.file_filter = file_filter
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self.edit = QLineEdit(text)
@@ -41,7 +43,7 @@ class PathRow(QWidget):
         if self.mode == "dir":
             p = QFileDialog.getExistingDirectory(self, "フォルダを選択", self.text() or "")
         else:
-            p, _ = QFileDialog.getOpenFileName(self, "ファイルを選択", self.text() or "", "Excel (*.xlsx *.xlsm);;すべて (*)")
+            p, _ = QFileDialog.getOpenFileName(self, "ファイルを選択", self.text() or "", self.file_filter)
         if p:
             self.edit.setText(p)
 

@@ -376,7 +376,7 @@ class IngestManager:
         # 前回取り込み済み（削除未実施）のカードを検出
         prev = self.ledger.latest_ingest_for_card(card.card_id_norm)
         if prev and prev.status in (L.STATUS_STAGED, L.STATUS_SYNCED) and not prev.cleared_at:
-            prev_files = {(f.name, f.size) for f in self.ledger.files_for(prev.id) if not f.deleted_at}
+            prev_files = {(f.card_name, f.card_size) for f in self.ledger.files_for(prev.id) if not f.deleted_at}
             cur_files = {(f.name, f.size) for f in card.files}
             if prev_files and cur_files <= prev_files:
                 self._set(job, S_SKIPPED,
@@ -483,10 +483,20 @@ class IngestManager:
             self._set(job, S_COPYING, f"コピー中 {i}/{card.n_files}")
 
         ts = L.now_iso()
+        # 変換（AVI → mp4）が有効なら、対象ファイル数を記録しておく。NAS 転送は変換が終わってから
+        n_convert = 0
+        if s.convert_enabled:
+            exts = {e.lower().lstrip(".") for e in s.convert_extensions}
+            n_convert = sum(1 for f in card.files if ("." in f.name and f.name.rsplit(".", 1)[-1].lower() in exts))
         self.ledger.update_ingest(ingest_id, status=L.STATUS_STAGED, finished_at=ts, staging_verified_at=ts,
-                                  message="中継先で検証済み")
+                                  message="中継先で検証済み", convert_pending=n_convert)
         self.ledger.write_manifest(ingest_id, dest_dir)
         self.ledger.event("ingest_done", f"{season_folder}/{dir_name}", cid)
-        nas_note = "。NASへの転送はバックグラウンドで続きます" if s.nas_root else ""
+        notes = []
+        if n_convert:
+            notes.append(f"mp4 への変換（{n_convert}ファイル）")
+        if s.nas_root:
+            notes.append("NASへの転送")
+        nas_note = "。" + "と".join(notes) + "はバックグラウンドで続きます" if notes else ""
         self._set(job, S_DONE, f"完了: {card.n_files}ファイル検証済み{nas_note}")
         self.on_log(f"[{cid}] 完了（{card.n_files}ファイル, {card.total_bytes/1e9:.2f} GB）")

@@ -13,7 +13,7 @@ authors = [{ name = "Yoshihiro Nakashima" }]
 dependencies = [
     "PySide6>=6.6",
     "openpyxl>=3.1",
-    "xxhash>=3.0",
+    "xxhash>=3.0", "imageio-ffmpeg>=0.5",
 ]
 
 [project.optional-dependencies]

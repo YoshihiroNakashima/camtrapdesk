@@ -103,7 +103,7 @@ def main() -> None:
                 logf.write(f"venv create failed: {e}\n")
                 fail("仮想環境（.venv）の作成に失敗しました。")
         fix_conda_path()
-        check = [PY, "-c", "import camtrapdesk.app, openpyxl, xxhash, ssl, sqlite3"]
+        check = [PY, "-c", "import camtrapdesk.app, openpyxl, xxhash, imageio_ffmpeg, ssl, sqlite3"]
         if run(check, logf) != 0:
             say("ライブラリを取得中…（PySide6 は 250MB ほどあります）")
             run([PY, "-m", "pip", "install", "--upgrade", "pip"], logf)

@@ -553,3 +553,101 @@ def test_other_camera_folder_falls_back_to_dcim(env):
     found = detect_cards(vols, "id.txt", ["DCIM/100_BTCF"], ["mp4"], False, 1024)
     assert len(found) == 1 and found[0].n_files == 2 and not found[0].problems
     assert any("DCIM 以下" in w for w in found[0].warnings)
+
+
+def make_avi(path, seconds=0.5):
+    """テスト用の小さな MJPEG の AVI を ffmpeg で作る。ffmpeg が無ければ None。"""
+    import subprocess
+    from camtrapdesk.core.ffmpeg import find_ffmpeg
+    ff = find_ffmpeg()
+    if not ff:
+        return None
+    r = subprocess.run([ff, "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size=96x64:rate=10",
+                        "-c:v", "mjpeg", "-q:v", "5", "-an", str(path)], capture_output=True)
+    return path if r.returncode == 0 else None
+
+
+def test_convert_avi_to_mp4_in_staging(env):
+    """変換を有効にすると、SD → 中継 は AVI のまま検証コピーし、中継で mp4 に変換して AVI を消し、NAS へは mp4 だけ送る。
+    SD の削除判定は元の AVI の名前・サイズで行える。"""
+    import pytest
+    from camtrapdesk.core.convert import Converter
+    from camtrapdesk.core.ffmpeg import find_ffmpeg
+    if not find_ffmpeg():
+        pytest.skip("ffmpeg が無い")
+    s, ledger = env["settings"], env["ledger"]
+    s.convert_enabled = True
+    s.convert_encoder = "libx264"
+    s.convert_parallel = 1
+    s.media_extensions = ["mp4", "avi"]
+    cards = env["cards"]
+    root, _names = make_card(cards, "264", n_files=1)          # IMG_0000.MP4（変換対象外）
+    media = os.path.join(root, "DCIM", "100_BTCF")
+    assert make_avi(os.path.join(media, "IMG_0001.AVI")) and make_avi(os.path.join(media, "IMG_0002.AVI"))
+    avi_size = os.path.getsize(os.path.join(media, "IMG_0001.AVI"))
+    mgr, logs = run_ingest(env)
+    job = next(iter(mgr.jobs.values()))
+    assert job.state == S_DONE and "変換" in job.message, (job.message, logs)
+    ing = ledger.latest_ingest_for_card("264")
+    assert ing.status == L.STATUS_STAGED and ing.convert_pending == 2
+    d = env["dest"] / "N260710" / "264"
+    assert (d / "IMG_0001.AVI").is_file()
+    assert ledger.pending_nas() == []                             # 変換が終わるまで NAS 転送は待つ
+
+    status = []
+    conv = Converter(lambda: s, ledger, on_status=status.append, on_log=logs.append)
+    for _ in range(5):
+        conv._tick()
+        if not ledger.pending_convert():
+            break
+    ing = ledger.latest_ingest_for_card("264")
+    assert ing.convert_pending == 0 and ing.convert_done_at
+    assert sorted(os.listdir(d)) == ["IMG_0000.MP4", "IMG_0001.mp4", "IMG_0002.mp4", "manifest.json"]
+    recs = {f.name: f for f in ledger.files_for(ing.id)}
+    r = recs["IMG_0001.mp4"]
+    assert r.converted and r.src_name == "IMG_0001.AVI" and r.src_size == avi_size and r.src_hash and r.hash
+    assert r.size == os.path.getsize(d / "IMG_0001.mp4") and r.hash == hash_file(str(d / "IMG_0001.mp4"))
+    assert not recs["IMG_0000.MP4"].converted
+    man = L.Ledger.read_manifest(str(d))
+    assert {f["name"] for f in man["files"]} == {"IMG_0000.MP4", "IMG_0001.mp4", "IMG_0002.mp4"}
+    assert [f for f in man["files"] if f["name"] == "IMG_0001.mp4"][0]["src_name"] == "IMG_0001.AVI"
+
+    # NAS へは mp4 だけ
+    assert len(ledger.pending_nas()) == 1
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=logs.append)
+    while ledger.pending_nas():
+        syncer._tick()
+    assert sorted(os.listdir(env["nas"] / "N260710" / "264")) == ["IMG_0000.MP4", "IMG_0001.mp4", "IMG_0002.mp4", "manifest.json"]
+
+    # 同じカードを挿し直しても「取り込み済み」（元の名前・サイズで判定）
+    mgr2, logs2 = run_ingest(env)
+    assert next(iter(mgr2.jobs.values())).state == S_SKIPPED, logs2
+
+    # SD の削除判定: カード上は AVI、台帳は mp4 でも照合できる
+    vols = list_volumes(scan_roots=[str(cards)])
+    card = detect_cards(vols, "id.txt", ["DCIM/100_BTCF"], ["mp4", "avi"], False, 1024)[0]
+    v = check_card(card, ledger, s, verify_hash=True)
+    assert v.ok, v.reasons
+    assert sorted(v.deletable) == ["IMG_0000.MP4", "IMG_0001.AVI", "IMG_0002.AVI"]
+    n, errs = delete_files(v, ledger, log=lambda m: None)
+    assert n == 3 and not errs
+    assert ledger.latest_ingest_for_card("264") is None   # cleared
+
+
+def test_convert_off_releases_pending_cards(env):
+    """変換を後からオフにすると、変換待ちだった分は元のまま NAS へ送られる。"""
+    from camtrapdesk.core.convert import Converter
+    s, ledger = env["settings"], env["ledger"]
+    s.convert_enabled = True
+    s.media_extensions = ["avi"]
+    root, _ = make_card(cards_dir := env["cards"], "9", n_files=0)
+    media = os.path.join(root, "DCIM", "100_BTCF")
+    for n in ("A.AVI", "B.AVI"):
+        with open(os.path.join(media, n), "wb") as f:
+            f.write(b"x" * 5000)
+    run_ingest(env)
+    ing = ledger.latest_ingest_for_card("9")
+    assert ing.convert_pending == 2 and ledger.pending_nas() == []
+    s.convert_enabled = False
+    Converter(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)._tick()
+    assert ledger.latest_ingest_for_card("9").convert_pending == 0 and len(ledger.pending_nas()) == 1

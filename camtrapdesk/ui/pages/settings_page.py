@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-                               QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
+                               QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
 from ...core.fieldnote import format_station
 from ..context import AppContext
@@ -99,6 +99,52 @@ class SettingsPage(QWidget):
         f3.addRow("除外するボリューム（カンマ区切り）", self.exclude)
         lay.addWidget(g3)
 
+        # --- 動画の変換 ---
+        g5 = QGroupBox("動画の変換（任意）: AVI などを H.264 の mp4 にしてから NAS へ送る")
+        f5 = QFormLayout(g5)
+        f5.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.conv_enabled = QCheckBox("変換する（SD → 中継 は元のまま検証コピーし、中継の上で mp4 に変換して元ファイルを消す）")
+        self.conv_enabled.setChecked(s.convert_enabled)
+        self.conv_ext = QLineEdit(", ".join(s.convert_extensions))
+        self.conv_ext.setMaximumWidth(200)
+        self.conv_crf = QSpinBox()
+        self.conv_crf.setRange(15, 35)
+        self.conv_crf.setValue(int(s.convert_crf))
+        self.conv_crf.setToolTip("小さいほど高画質で大きいファイル。23 が標準（MJPEG の AVI なら 10分の1 程度）、26 でさらに半分")
+        self.conv_encoder = QComboBox()
+        for code, label in (("auto", "自動（GPU や内蔵エンコーダがあれば使う。無ければ CPU）"), ("libx264", "CPU（libx264）"),
+                            ("h264_nvenc", "NVIDIA（nvenc）"), ("h264_qsv", "Intel 内蔵（QuickSync）"),
+                            ("h264_amf", "AMD（AMF）"), ("h264_videotoolbox", "Mac（VideoToolbox）")):
+            self.conv_encoder.addItem(label, code)
+        i = self.conv_encoder.findData(s.convert_encoder)
+        self.conv_encoder.setCurrentIndex(i if i >= 0 else 0)
+        self.conv_parallel = QSpinBox()
+        self.conv_parallel.setRange(1, 8)
+        self.conv_parallel.setValue(int(s.convert_parallel))
+        self.ffmpeg_path = PathRow(s.ffmpeg_path, "file", placeholder="空なら自動で探す（アプリ同梱 → PATH）",
+                                   file_filter="ffmpeg (ffmpeg.exe ffmpeg);;すべて (*)")
+        self.ffmpeg_check = QPushButton("ffmpeg とエンコーダを確認")
+        self.ffmpeg_check.clicked.connect(self._check_ffmpeg)
+        self.ffmpeg_result = QLabel("")
+        self.ffmpeg_result.setWordWrap(True)
+        f5.addRow("", self.conv_enabled)
+        hc = QHBoxLayout()
+        hc.addWidget(QLabel("変換する拡張子"))
+        hc.addWidget(self.conv_ext)
+        hc.addWidget(QLabel("画質（CRF）"))
+        hc.addWidget(self.conv_crf)
+        hc.addWidget(QLabel("同時に変換する本数"))
+        hc.addWidget(self.conv_parallel)
+        hc.addStretch(1)
+        f5.addRow("", hc)
+        f5.addRow("エンコーダ", self.conv_encoder)
+        f5.addRow("ffmpeg の場所", self.ffmpeg_path)
+        hf = QHBoxLayout()
+        hf.addWidget(self.ffmpeg_check)
+        hf.addWidget(self.ffmpeg_result, 1)
+        f5.addRow("", hf)
+        lay.addWidget(g5)
+
         # --- 野帳と地点名 ---
         g4 = QGroupBox("野帳の列名と地点名の付け方")
         f4 = QFormLayout(g4)
@@ -148,6 +194,19 @@ class SettingsPage(QWidget):
         lay.addLayout(hb)
         lay.addStretch(1)
 
+    def _check_ffmpeg(self) -> None:
+        from ...core.ffmpeg import detect_encoder, find_ffmpeg
+        from PySide6.QtWidgets import QApplication
+        path = find_ffmpeg(self.ffmpeg_path.text())
+        if not path:
+            self.ffmpeg_result.setText("ffmpeg が見つかりません。配布版には同梱されています。開発環境では pip install imageio-ffmpeg か、ffmpeg.exe の場所を指定してください")
+            return
+        self.ffmpeg_result.setText(f"{path} を確認中…")
+        QApplication.processEvents()
+        enc = detect_encoder(path, self.conv_encoder.currentData() or "auto")
+        kind = "CPU" if enc == "libx264" else "ハードウェア"
+        self.ffmpeg_result.setText(f"ffmpeg: {path}\n使うエンコーダ: {enc}（{kind}）")
+
     def _update_example(self) -> None:
         pre = self.station_prefix.text().strip()
         d = int(self.station_digits.value())
@@ -184,5 +243,11 @@ class SettingsPage(QWidget):
         s.card_id_match_tail_number = self.tail_match.isChecked()
         s.station_prefix = self.station_prefix.text().strip()
         s.station_digits = int(self.station_digits.value())
+        s.convert_enabled = self.conv_enabled.isChecked()
+        s.convert_extensions = [e.lstrip(".").lower() for e in self._split(self.conv_ext.text())] or ["avi"]
+        s.convert_crf = int(self.conv_crf.value())
+        s.convert_encoder = self.conv_encoder.currentData() or "auto"
+        s.convert_parallel = int(self.conv_parallel.value())
+        s.ffmpeg_path = self.ffmpeg_path.text()
         self.ctx.save()
         QMessageBox.information(self, "設定", "保存しました。同時コピー枚数の変更はアプリの再起動後に反映されます。")

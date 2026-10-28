@@ -53,19 +53,22 @@ def check_card(card: Card, ledger: L.Ledger, s: Settings, verify_hash: bool = Fa
         v.reasons.append("NASへの転送・検証がまだ終わっていません")
         return v
 
-    recs = {f.name: f for f in ledger.files_for(ing.id) if not f.deleted_at}
+    if ing.convert_pending:
+        v.reasons.append(f"mp4 への変換がまだ終わっていません（{ing.convert_pending}ファイル）")
+        return v
+    recs = {f.card_name: f for f in ledger.files_for(ing.id) if not f.deleted_at}   # カード上の名前で引く
     mismatch = 0
     for f in card.files:
         r = recs.get(f.name)
         if r is None:
             v.extra.append(f.name)
             continue
-        if r.size != f.size:
+        if r.card_size != f.size:
             mismatch += 1
-            v.reasons.append(f"サイズ不一致: {f.name}（カード {f.size} / 台帳 {r.size}）")
+            v.reasons.append(f"サイズ不一致: {f.name}（カード {f.size} / 台帳 {r.card_size}）")
             continue
-        if verify_hash and r.hash:
-            if hash_file(f.src_path) != r.hash:
+        if verify_hash and r.card_hash:
+            if hash_file(f.src_path) != r.card_hash:
                 mismatch += 1
                 v.reasons.append(f"ハッシュ不一致: {f.name}")
                 continue
@@ -82,8 +85,9 @@ def check_card(card: Card, ledger: L.Ledger, s: Settings, verify_hash: bool = Fa
     if os.path.isdir(dest_dir):
         missing = []
         for name in v.deletable:
-            p = os.path.join(dest_dir, name)
-            if not os.path.isfile(p) or os.path.getsize(p) != recs[name].size:
+            r = recs[name]
+            p = os.path.join(dest_dir, r.name)   # 変換済みなら mp4 の名前とサイズで確かめる
+            if not os.path.isfile(p) or os.path.getsize(p) != r.size:
                 missing.append(name)
         if missing:
             v.reasons.append(f"保存先にファイルがありません/サイズ不一致: {missing[0]} ほか{len(missing)}件")

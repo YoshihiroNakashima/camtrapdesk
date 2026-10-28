@@ -42,12 +42,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          pyinstaller --noconfirm --clean --windowed --onefile --name camtrapdesk --paths . --collect-all openpyxl tools/entry.py
+          pyinstaller --noconfirm --clean --windowed --onefile --name camtrapdesk --paths . --collect-all openpyxl --collect-all imageio_ffmpeg tools/entry.py
           mv dist/camtrapdesk.exe dist/camtrapdesk-windows.exe
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: |
-          pyinstaller --noconfirm --clean --windowed --name camtrapdesk --paths . --collect-all openpyxl tools/entry.py
+          pyinstaller --noconfirm --clean --windowed --name camtrapdesk --paths . --collect-all openpyxl --collect-all imageio_ffmpeg tools/entry.py
           # 署名していないので、初回は「システム設定 > プライバシーとセキュリティ」で許可が必要（README 参照）
           cd dist && ditto -c -k --sequesterRsrc --keepParent camtrapdesk.app ../${{ matrix.artifact }}.zip
       - uses: actions/upload-artifact@v4

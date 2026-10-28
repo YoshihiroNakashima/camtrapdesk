@@ -126,10 +126,12 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QMessageBox
         from ..core import ingest as I
         active = [j for j in self.ctx.ingest.jobs.values() if j.state in (I.S_QUEUED, I.S_COPYING, I.S_VERIFYING)]
-        if active or self.ctx.nas.current:
+        if active or self.ctx.nas.current or self.ctx.converter.current:
             parts = []
             if active:
                 parts.append(f"カードのコピーが {len(active)} 枚進行中")
+            if self.ctx.converter.current:
+                parts.append(f"mp4 への変換中（{self.ctx.converter.current}）")
             if self.ctx.nas.current:
                 parts.append(f"NASへの転送中（{self.ctx.nas.current}）")
             msg = "、".join(parts) + "です。\n終了すると途中のファイルは次回起動時にやり直します。終了しますか？"

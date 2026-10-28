@@ -54,6 +54,13 @@ class Settings:
     min_free_gb: float = 20.0              # 中継の空きがカード容量＋この余裕を下回るなら、空くまでコピーを待たせる
     poll_interval_sec: float = 3.0
     auto_start_ingest: bool = True
+    # --- 動画の変換（任意）: 中継先で AVI などを H.264 の mp4 にしてから NAS へ送る ---
+    convert_enabled: bool = False
+    convert_extensions: list[str] = field(default_factory=lambda: ["avi"])   # 変換する拡張子（mp4 は対象外）
+    convert_crf: int = 23            # 画質（libx264 の CRF 相当。18 高画質〜28 小さい。23 が標準）
+    convert_encoder: str = "auto"    # auto / libx264 / h264_nvenc / h264_qsv / h264_amf / h264_videotoolbox
+    convert_parallel: int = 2        # 同時に変換する本数
+    ffmpeg_path: str = ""            # 空なら自動（アプリ同梱 → imageio-ffmpeg → PATH）
     # --- 野帳 ---
     fieldnote_path: str = field(default_factory=_default_fieldnote_path)
     fieldnote_sheet: str = ""      # 空なら最初のシート

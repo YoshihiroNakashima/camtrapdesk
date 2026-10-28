@@ -73,9 +73,14 @@ class IngestPage(QWidget):
         split.setSizes([400, 160])
         root.addWidget(split, 1)
 
-        # --- NAS ---
-        nas_box = QGroupBox("NASへの転送（バックグラウンド）")
-        nl = QHBoxLayout(nas_box)
+        # --- 変換・NAS ---
+        nas_box = QGroupBox("裏で続く処理（mp4 への変換、NASへの転送）")
+        nv = QVBoxLayout(nas_box)
+        self.convert_status = QLabel("")
+        self.convert_status.setVisible(False)
+        nv.addWidget(self.convert_status)
+        nl = QHBoxLayout()
+        nv.addLayout(nl)
         self.nas_status = QLabel("NAS転送: 待機中")
         self.nas_bar = QProgressBar()
         self.nas_bar.setRange(0, 1000)
@@ -94,6 +99,7 @@ class IngestPage(QWidget):
         ctx.batch_done.connect(self._on_batch_done)
         ctx.nas_status.connect(self._on_nas_status)
         ctx.nas_progress.connect(self._on_nas_progress)
+        ctx.convert_status.connect(self._on_convert_status)
         ctx.settings_changed.connect(self._refresh_labels)
         self._refresh_labels()
 
@@ -203,6 +209,10 @@ class IngestPage(QWidget):
         win = self.window()
         if hasattr(win, "notify"):
             win.notify("取り込み完了", f"{n}枚のカードが完了しました。入れ替えてください。")
+
+    def _on_convert_status(self, msg: str) -> None:
+        self.convert_status.setText(msg)
+        self.convert_status.setVisible(bool(msg))
 
     def _on_nas_status(self, msg: str) -> None:
         self.nas_status.setText(msg)

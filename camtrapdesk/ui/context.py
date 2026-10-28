@@ -7,6 +7,7 @@ import os
 from PySide6.QtCore import QObject, Signal
 
 from ..config import Settings, config_dir, load_settings, save_settings
+from ..core.convert import Converter
 from ..core.ingest import CardJob, IngestManager
 from ..core.ledger import Ledger
 from ..core.nas_sync import NasSyncer
@@ -19,6 +20,7 @@ class AppContext(QObject):
     batch_done = Signal(int)
     nas_status = Signal(str)
     nas_progress = Signal(str, float)
+    convert_status = Signal(str)
     settings_changed = Signal()
 
     def __init__(self):
@@ -36,12 +38,17 @@ class AppContext(QObject):
                              on_log=self.log_message.emit,
                              on_progress=self.nas_progress.emit,
                              is_ingest_busy=lambda: self.ingest.active_count() > 0)
-        # 取り込みが1枚終わるたびに NAS 転送係を起こす（待ち時間なしで転送を始める）
+        self.converter = Converter(self.get_settings, self.ledger,
+                                   on_status=self.convert_status.emit,
+                                   on_log=self.log_message.emit,
+                                   on_ingest_done=lambda _iid: self.nas.wake())
+        # 取り込みが1枚終わるたびに変換係と NAS 転送係を起こす（待ち時間なしで始める）
         self.job_updated.connect(self._maybe_wake_nas)
 
     def _maybe_wake_nas(self, job: CardJob) -> None:
         from ..core.ingest import S_DONE
         if job.state == S_DONE:
+            self.converter.wake()
             self.nas.wake()
 
     def get_settings(self) -> Settings:
@@ -70,6 +77,8 @@ class AppContext(QObject):
     def save(self) -> None:
         save_settings(self.settings)
         self._apply_match_mode()
+        self.converter.encoder = None   # エンコーダの指定が変わったかもしれないので選び直す
+        self.converter.wake()
         self.settings_changed.emit()
 
     def _apply_match_mode(self) -> None:
@@ -80,8 +89,10 @@ class AppContext(QObject):
 
     def start_background(self) -> None:
         self.ingest.start()
+        self.converter.start()
         self.nas.start()
 
     def stop_background(self) -> None:
         self.ingest.stop()
+        self.converter.stop()
         self.nas.stop()
