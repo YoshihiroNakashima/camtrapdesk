@@ -17,7 +17,17 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libdbus-1-3
       - run: pip install -e ".[dev]"
-      - run: QT_QPA_PLATFORM=offscreen python -m pytest -q
+      - name: Test
+        shell: bash
+        run: |
+          set -o pipefail
+          QT_QPA_PLATFORM=offscreen python -m pytest -q -rA --tb=short 2>&1 | tee pytest.txt
+      - name: Report failure
+        if: failure()
+        shell: bash
+        run: |
+          # 失敗の要点を注釈に出す（ログがダウンロードできない環境からも読めるように）
+          tail -n 60 pytest.txt | python -c "import sys; print('::error title=pytest::' + sys.stdin.read().replace('%', '%25').replace('\r', '').replace('\n', '%0A'))"
 
   build:
     needs: test
