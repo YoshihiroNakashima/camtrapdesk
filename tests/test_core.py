@@ -3,7 +3,7 @@ import time
 
 from openpyxl import Workbook
 
-from camtrapdesk.config import Settings, TypeRule
+from camtrapdesk.config import Settings
 from camtrapdesk.core import ledger as L
 from camtrapdesk.core.cards import detect_cards, normalize_card_id
 from camtrapdesk.core.clear import check_card, delete_files
@@ -147,11 +147,15 @@ def make_fieldnote(path, rows):
 
 
 def test_format_station():
-    rule = TypeRule("N", "BSN", 4)
-    assert format_station("482", rule) == "BSN0482"
-    assert format_station("BSN730", rule) == "BSN0730"
-    assert format_station("_045", rule) == "BSN0045"
-    assert format_station("MUC0727", rule) == "MUC0727"
+    assert format_station("482", "BSN", 4) == "BSN0482"
+    assert format_station("BSN730", "BSN", 4) == "BSN0730"
+    assert format_station("_045", "BSN", 4) == "BSN0045"
+    assert format_station("482", "", 4) == "0482"        # 接頭辞なし → 数字だけ
+    assert format_station("482", "", 0) == "482"
+    assert format_station("0482", "ST", 0) == "ST0482"   # 桁数 0 → 番号は書かれたまま
+    assert format_station("Ridge-03", "", 0) == "Ridge-03"
+    assert format_station("Ridge-A", "BSN", 4) == "Ridge-A"   # 番号でないものはそのまま
+    assert format_station("MUC0727", "BSN", 4) == "MUC0727"
 
 
 def test_fieldnote_mapping_and_rename(env):
@@ -218,7 +222,7 @@ def test_real_fieldnote_if_present():
     s = nakashima_settings()
     fn = load_fieldnote(path, s)
     assert "N" in fn.types()
-    m = build_mapping(fn, "N", "260710", s)
+    m = build_mapping(fn, "N", "260710", s, season_folder="N260710")
     assert m.season_folder == "N260710"
     assert len(m.entries) == 148
     dup = [e for e in m.entries if e.errors]
@@ -238,8 +242,8 @@ def test_fieldnote_tolerant_headers(tmp_path):
     fn = load_fieldnote(str(p), s)
     assert any("Statuion" in n for n in fn.notes)
     assert fn.seasons("N") == ["N261016"]
-    m = build_mapping(fn, "N", "N261016", s)
-    assert m.season_folder == "N261016"          # 接頭辞が付いていれば二重に付けない
+    m = build_mapping(fn, "N", "N261016", s, season_folder="N261016")
+    assert m.season_folder == "N261016"          # 変更するフォルダは野帳の Season とは別に指定する
     assert [e.station_folder for e in m.entries] == ["BSN0690"]
     assert m.entries[0].card_id == "263"
     # 列が本当に無いときは、ファイルの列一覧を含むエラー
@@ -494,7 +498,7 @@ def test_generic_fieldnote_without_season_and_type(env):
     from openpyxl import Workbook
     s = Settings(dest_root=str(env["dest"]), nas_root=str(env["nas"]), season_folder="",
                  scan_roots=[str(env["cards"])], concurrency=2, poll_interval_sec=0.2)
-    assert s.rule_for("").is_plain and s.rule_for("anything").is_plain
+    s.station_prefix, s.station_digits = "", 0    # 接頭辞もゼロ埋めも無し → 野帳の値そのまま
     env["settings"] = s
     ledger = env["ledger"]
     make_card(env["cards"], "12", n_files=2)
@@ -533,8 +537,13 @@ def test_generic_fieldnote_without_season_and_type(env):
 
 def test_default_settings_are_not_user_specific():
     s = Settings()
-    assert s.fieldnote_path == "" and s.type_rules == {} and s.default_type == "" and s.volume_label_prefix == ""
-    assert format_station(" 0482 ", TypeRule()) == "0482"   # ルール無しならそのまま
+    assert s.fieldnote_path == "" and s.volume_label_prefix == "" and s.last_type == ""
+    assert (s.station_prefix, s.station_digits) == ("BSN", 4)   # 既定は BSN + 4桁。接頭辞を空にすると数字だけ
+    assert format_station(" 0482 ", "", 4) == "0482"
+    # 旧形式の設定（Type ごとの規則）からの読み替え
+    old = {"type_rules": {"N": {"season_prefix": "N", "station_prefix": "ST", "station_pad": 3}}, "default_type": "N"}
+    s2 = Settings.from_dict(old)
+    assert (s2.station_prefix, s2.station_digits) == ("ST", 3)
 
 
 def test_other_camera_folder_falls_back_to_dcim(env):

@@ -32,20 +32,6 @@ def _default_fieldnote_path() -> str:
 
 
 @dataclass
-class TypeRule:
-    """野帳の Type ごとの、Season / Station のフォルダ名整形ルール。
-    既定（接頭辞なし・ゼロ埋めなし）では野帳の値をそのままフォルダ名にする。
-    例: Type N に season_prefix="N", station_prefix="BSN", station_pad=4 を設定すると 260710 → N260710、482 → BSN0482。"""
-    season_prefix: str = ""
-    station_prefix: str = ""
-    station_pad: int = 0
-
-    @property
-    def is_plain(self) -> bool:
-        return not self.season_prefix and not self.station_prefix and not self.station_pad
-
-
-@dataclass
 class Settings:
     # --- 取り込み先 ---
     dest_root: str = ""            # 中継（または直接NAS）の保存先ルート
@@ -76,8 +62,10 @@ class Settings:
     col_type: str = "Type"
     col_retrieval_sd: str = "RetrievalSD"
     card_id_match_tail_number: bool = True   # id.txt の "6_650" と野帳の 650 を同一視する
-    default_type: str = ""                   # 「地点名に変更」で最初に選ぶ Type（空なら野帳で最も多いもの）
-    type_rules: dict[str, TypeRule] = field(default_factory=dict)   # Type ごとの整形ルール（無ければそのまま）
+    # 地点名（フォルダ名）の付け方: 接頭辞＋番号をゼロ埋め。例: BSN + 4桁 → 482 → BSN0482。接頭辞が空なら数字だけ（0482）
+    station_prefix: str = "BSN"
+    station_digits: int = 4                  # 0 ならゼロ埋めしない
+    last_type: str = ""                      # 「地点名に変更」で前回選んだ Type（次回も同じものを選ぶ）
     # --- ボリューム検出 ---
     scan_roots: list[str] = field(default_factory=list)   # 追加の検索ルート（テスト・Linux用）
     exclude_volumes: list[str] = field(default_factory=list)
@@ -85,22 +73,21 @@ class Settings:
     slot_names: dict[str, str] = field(default_factory=dict)   # ボリューム識別子（リーダーのスロット）→ 人が付けた名前
 
     # ------------------------------------------------------------------
-    def rule_for(self, type_code: str) -> TypeRule:
-        """Type の整形ルール。未設定なら野帳の値をそのまま使う。"""
-        return self.type_rules.get(type_code) or self.type_rules.get("*") or TypeRule()
-
     def to_dict(self) -> dict[str, Any]:
-        d = asdict(self)
-        d["type_rules"] = {k: asdict(v) for k, v in self.type_rules.items()}
-        return d
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Settings":
         s = cls()
         for k, v in d.items():
             if k == "type_rules" and isinstance(v, dict):
-                s.type_rules = {kk: TypeRule(**vv) for kk, vv in v.items()}
-            elif hasattr(s, k):
+                # 旧形式（Type ごとの規則）からの移行: 最初の規則の接頭辞と桁数を引き継ぐ
+                for rule in v.values():
+                    if isinstance(rule, dict):
+                        s.station_prefix = str(rule.get("station_prefix", s.station_prefix))
+                        s.station_digits = int(rule.get("station_pad", s.station_digits) or 0)
+                        break
+            elif hasattr(s, k) and not k.startswith("_"):
                 setattr(s, k, v)
         return s
 

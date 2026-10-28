@@ -33,13 +33,7 @@ class IngestPage(QWidget):
         self.season_edit.editingFinished.connect(self._season_changed)
         form.addRow("調査回（シーズン）のフォルダ名", self.season_edit)
         self.dest_label = QLabel()
-        self.dest_btn = QPushButton("中継先を変更…")
-        self.dest_btn.setToolTip("中継のSSDがいっぱいになったら、別のSSDを繋いでここでそのフォルダを選ぶと、空き待ちのカードがそちらへ続きます")
-        self.dest_btn.clicked.connect(self._change_dest)
-        hd = QHBoxLayout()
-        hd.addWidget(self.dest_label, 1)
-        hd.addWidget(self.dest_btn)
-        form.addRow("保存先（中継）", hd)
+        form.addRow("保存先（中継）", self.dest_label)
         self.nas_label = QLabel()
         form.addRow("NAS", self.nas_label)
         root.addWidget(box)
@@ -122,27 +116,13 @@ class IngestPage(QWidget):
             dest += f"　空き {human_size(free)}"
             if s.nas_root and s.staging_cleanup_after_nas:
                 dest += "（NASで検証済みの分は自動で消して空けます）"
+        elif s.dest_root:
+            dest += "　（見つかりません。取り外し中？）"
+        dest += "　※変更は「設定」で（いっぱいになったら別のSSDを繋いで設定を変えると続きから取り込みます）"
         self.dest_label.setText(dest)
         self.nas_label.setText(s.nas_root or "（NAS転送なし。保存先が最終保存先になります）")
         if self.season_edit.text() != s.season_folder:
             self.season_edit.setText(s.season_folder)
-
-    def _change_dest(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
-        s = self.ctx.settings
-        d = QFileDialog.getExistingDirectory(self, "中継先のフォルダを選ぶ（例: 別のSSDの CamTrap フォルダ）", s.dest_root or "")
-        if not d:
-            return
-        d = os.path.normpath(d)
-        if d == s.dest_root:
-            return
-        s.dest_root = d
-        self.ctx.save()
-        self._ensure_season_dir()
-        self._refresh_labels()
-        waiting = sum(1 for j in self.ctx.ingest.jobs.values() if j.state == I.S_WAITING)
-        note = f"\n空き待ちのカード {waiting} 枚は、次の確認（10秒以内）でこちらに取り込みを始めます。" if waiting else ""
-        QMessageBox.information(self, "中継先", f"中継先を {d} にしました。{note}\n\n以前の中継先に残っている分のNAS転送は、そのSSDが繋がっているあいだに続きます。")
 
     def _season_changed(self) -> None:
         v = self.season_edit.text().strip()

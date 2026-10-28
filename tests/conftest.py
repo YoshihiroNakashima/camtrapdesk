@@ -3,15 +3,16 @@ import random
 
 import pytest
 
-from camtrapdesk.config import Settings, TypeRule
+from camtrapdesk.config import Settings
 from camtrapdesk.core.ledger import Ledger
-
-# 中島研の野帳の整形ルール（Type N → N260710 / BSN0482）。既定は「そのまま」なので、テストでは明示する
-NAKASHIMA_RULES = {"N": TypeRule("N", "BSN", 4)}
 
 
 def nakashima_settings(**kw) -> Settings:
-    return Settings(type_rules=dict(NAKASHIMA_RULES), default_type="N", **kw)
+    """中島研の付け方（接頭辞 BSN、4桁。既定と同じ）を明示した設定。"""
+    kw.setdefault("station_prefix", "BSN")
+    kw.setdefault("station_digits", 4)
+    kw.setdefault("last_type", "N")
+    return Settings(**kw)
 
 
 def make_card(cards_dir, card_id, n_files=3, size=200_000, subdir="DCIM/100_BTCF", seed=0):

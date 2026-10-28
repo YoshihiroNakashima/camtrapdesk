@@ -43,16 +43,26 @@ class RenamePage(QWidget):
         h2.addWidget(self.type_combo)
         h2.addWidget(QLabel("Season"))
         h2.addWidget(self.season_combo)
-        h2.addWidget(QLabel("（野帳の回収SD列のカードIDを地点名に対応づけます）"))
+        h2.addWidget(QLabel("（野帳のこの行を使い、回収SD列のカードIDを地点名に対応づけます）"))
         h2.addStretch(1)
-        form.addRow("対象", h2)
+        form.addRow("野帳の行", h2)
+        h4 = QHBoxLayout()
+        self.folder_combo = QComboBox()
+        self.folder_combo.setMinimumWidth(220)
+        self.folder_combo.setToolTip("保存先（中継）と NAS にあるシーズンフォルダの一覧。通常は取り込み画面で指定した今回のフォルダ")
+        self.folder_refresh = QPushButton("一覧を更新")
+        self.folder_refresh.clicked.connect(self.refresh_folders)
+        h4.addWidget(self.folder_combo)
+        h4.addWidget(self.folder_refresh)
+        h4.addWidget(QLabel("（このフォルダの中のカードIDのフォルダを地点名にします。保存先とNASの両方を見て、ある方を変更）"))
+        h4.addStretch(1)
+        form.addRow("変更するフォルダ", h4)
         h3 = QHBoxLayout()
         self.dry_btn = QPushButton("ドライラン（確認）")
         self.dry_btn.clicked.connect(self.dry_run)
         self.apply_btn = QPushButton("変更を実行")
         self.apply_btn.setEnabled(False)
         self.apply_btn.clicked.connect(self.apply)
-        h3.addWidget(QLabel("保存先（中継）とNASの両方のフォルダを見て、ある方を変更します"))
         h3.addWidget(self.dry_btn)
         h3.addWidget(self.apply_btn)
         h3.addStretch(1)
@@ -68,10 +78,48 @@ class RenamePage(QWidget):
         split.setSizes([420, 140])
         root.addWidget(split, 1)
         ctx.settings_changed.connect(self._settings_changed)
+        self.refresh_folders()
 
     def _settings_changed(self) -> None:
         if self.path_row.text() != self.ctx.settings.fieldnote_path:
             self.path_row.setText(self.ctx.settings.fieldnote_path)
+        self.refresh_folders()
+
+    def showEvent(self, e) -> None:  # noqa: N802
+        super().showEvent(e)
+        self.refresh_folders()
+
+    def refresh_folders(self) -> None:
+        """保存先と NAS にあるシーズンフォルダを一覧にし、取り込み画面で指定中のものを選ぶ。"""
+        import os
+        s = self.ctx.settings
+        names: set[str] = set()
+        for root in (s.dest_root, s.nas_root):
+            if root and os.path.isdir(root):
+                try:
+                    for n in os.listdir(root):
+                        p = os.path.join(root, n)
+                        if os.path.isdir(p) and not n.startswith(".") and not os.path.isfile(os.path.join(p, "manifest.json")):
+                            names.add(n)
+                except OSError:
+                    pass
+        cur = s.season_folder.strip()
+        if cur:
+            names.add(cur)
+        prev = self.folder_combo.currentData()
+        self.folder_combo.blockSignals(True)
+        self.folder_combo.clear()
+        self.folder_combo.addItem("（保存先の直下）", "")
+        for n in sorted(names, reverse=True):
+            self.folder_combo.addItem(n, n)
+        want = prev if prev else cur
+        idx = self.folder_combo.findData(want)
+        self.folder_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.folder_combo.blockSignals(False)
+
+    def _folder(self) -> str:
+        d = self.folder_combo.currentData()
+        return d if d is not None else ""
 
     def _path_edited(self) -> None:
         p = self.path_row.text()
@@ -92,8 +140,9 @@ class RenamePage(QWidget):
             QMessageBox.critical(self, "野帳の読み込み", f"読み込めませんでした:\n{e}")
             return
         self.fieldnote = fn
-        if path != self.ctx.settings.fieldnote_path:
+        if path != self.ctx.settings.fieldnote_path or fn.sheet != self.ctx.settings.fieldnote_sheet:
             self.ctx.settings.fieldnote_path = path
+            self.ctx.settings.fieldnote_sheet = fn.sheet
             self.ctx.save()
         self.sheet_combo.blockSignals(True)
         self.sheet_combo.clear()
@@ -104,9 +153,9 @@ class RenamePage(QWidget):
         self.type_combo.clear()
         for t in fn.types():
             self.type_combo.addItem(t if t else "（Type列なし）", t)
-        default_type = self.ctx.settings.default_type
-        if default_type in fn.types():
-            self.type_combo.setCurrentIndex(fn.types().index(default_type))
+        last_type = self.ctx.settings.last_type
+        if last_type in fn.types():
+            self.type_combo.setCurrentIndex(fn.types().index(last_type))
         self.type_combo.setEnabled(fn.has_type)
         self.type_combo.blockSignals(False)
         self._type_changed(self.type_combo.currentText())
@@ -135,11 +184,10 @@ class RenamePage(QWidget):
         for sn in seasons:
             self.season_combo.addItem(sn if sn else "（Season列なし: 全行）", sn)
         self.season_combo.setEnabled(self.fieldnote.has_season)
-        # 取り込み中のシーズンがあればそれを選ぶ
-        cur = self.ctx.settings.season_folder.strip()
-        rule = self.ctx.settings.rule_for(t)
+        # 変更するフォルダ名に対応する Season があればそれを選ぶ（N260710 ↔ 260710 のような接頭辞付きも可）
+        cur = (self._folder() or self.ctx.settings.season_folder).strip()
         for i, sn in enumerate(seasons):
-            if sn and (sn == cur or rule.season_prefix + sn == cur):
+            if sn and cur and (sn == cur or cur.endswith(sn) or sn.endswith(cur)):
                 self.season_combo.setCurrentIndex(i)
                 break
 
@@ -161,7 +209,10 @@ class RenamePage(QWidget):
         if not root and not nas_root:
             QMessageBox.warning(self, "フォルダ", "変更するフォルダの場所（保存先かNAS）が設定されていません。")
             return
-        mapping = build_mapping(self.fieldnote, t, season, self.ctx.settings)
+        if t != self.ctx.settings.last_type:
+            self.ctx.settings.last_type = t
+            self.ctx.save()
+        mapping = build_mapping(self.fieldnote, t, season, self.ctx.settings, season_folder=self._folder())
         plan = R.build_plan(root, nas_root, mapping, self.ctx.ledger)
         self.plan = plan
         self._show_plan(plan)

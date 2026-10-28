@@ -10,7 +10,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-from ..config import Settings, TypeRule
+from ..config import Settings
 from .cards import normalize_card_id
 
 
@@ -166,35 +166,28 @@ def load_fieldnote(path: str, s: Settings, sheet: str | None = None) -> Fieldnot
 # 名前の整形
 # ----------------------------------------------------------------------------
 
-def format_station(raw: str, rule: TypeRule) -> str:
-    """地点名を整形する。ルールが無ければ野帳の値をそのまま（空白だけ除く）。
-    ルールがあれば、数値は接頭辞＋ゼロ埋め（482 → BSN0482）、
-    文字列で末尾が数字なら末尾をゼロ埋め（BSN730 → BSN0730）、英字の接頭辞が無ければ接頭辞を付ける。"""
+def format_station(raw: str, prefix: str = "", digits: int = 0) -> str:
+    """地点名（フォルダ名）を整形する。
+    数値なら接頭辞＋ゼロ埋め（482 → BSN0482。接頭辞が空なら 0482、桁数 0 なら書かれたまま）。
+    文字列で末尾が数字なら末尾をゼロ埋め（BSN730 → BSN0730）、英字の接頭辞が無ければ接頭辞を付ける。
+    それ以外（Ridge-A など）はそのまま。"""
     s = (raw or "").strip()
     if not s:
         return ""
-    if rule.is_plain:
-        return s
+    digits = max(0, int(digits or 0))
+
+    def pad(num: str) -> str:
+        return f"{int(num):0{digits}d}" if digits else num   # 桁数 0 なら番号は書かれたまま
+
     if s.isdigit():
-        return f"{rule.station_prefix}{int(s):0{rule.station_pad}d}"
+        return f"{prefix}{pad(s)}"
     m = re.match(r"^(.*?)(\d+)$", s)
     if m:
         head, num = m.group(1), m.group(2)
-        padded = f"{int(num):0{rule.station_pad}d}"
         if re.search(r"[A-Za-z]", head):
-            return f"{head}{padded}"
-        return f"{rule.station_prefix}{padded}"
+            return f"{head}{pad(num)}"
+        return f"{prefix}{pad(num)}"
     return s
-
-
-def format_season_folder(season: str, rule: TypeRule) -> str:
-    """シーズンのフォルダ名。'260710' → 'N260710'。既に 'N260710' ならそのまま。"""
-    s = (season or "").strip()
-    if not s:
-        return ""
-    if rule.season_prefix and s.startswith(rule.season_prefix):
-        return s
-    return f"{rule.season_prefix}{s}"
 
 
 # ----------------------------------------------------------------------------
@@ -229,16 +222,16 @@ class Mapping:
         return d
 
 
-def build_mapping(fn: Fieldnote, type_code: str, season: str, s: Settings) -> Mapping:
+def build_mapping(fn: Fieldnote, type_code: str, season: str, s: Settings, season_folder: str | None = None) -> Mapping:
     """選んだ Type と Season の行から、回収SDのカードID→地点フォルダ名の対応表を作る。
 
+    season_folder は変更するフォルダ（保存先の下のシーズンフォルダ名。空なら保存先の直下）。
+    省略すると設定の現在のシーズンフォルダ。野帳の Season は行の選択にだけ使う。
     重複（同じカードIDが複数行、整形後の地点名が複数行）は該当行にエラーを付け、
     それ以外の行は変更可能なままにする。
     """
-    rule = s.rule_for(type_code)
     rows = fn.select(type_code, season)
-    # Season 列が無い野帳では、取り込み先のシーズンフォルダ（設定）をそのまま使う
-    season_folder = format_season_folder(season, rule) if fn.has_season else s.season_folder.strip()
+    season_folder = (s.season_folder if season_folder is None else season_folder).strip()
     entries: list[MapEntry] = []
     issues: list[str] = list(fn.notes)
     if not rows:
@@ -248,7 +241,7 @@ def build_mapping(fn: Fieldnote, type_code: str, season: str, s: Settings) -> Ma
 
     for r in rows:
         sd = r.retrieval_sd
-        st = format_station(r.station, rule)
+        st = format_station(r.station, s.station_prefix, s.station_digits)
         e = MapEntry(card_id=sd, card_id_norm=normalize_card_id(sd) if sd else "", station_folder=st,
                      row_no=r.row_no, date=r.date, state=r.state, remarks=r.remarks)
         if not sd:

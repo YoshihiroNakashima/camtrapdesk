@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-                               QMessageBox, QPushButton, QScrollArea, QSpinBox, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout, QWidget, QHeaderView)
+                               QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
 
-from ...config import TypeRule
+from ...core.fieldnote import format_station
 from ..context import AppContext
 from ..widgets import PathRow
 
@@ -29,10 +28,9 @@ class SettingsPage(QWidget):
         f1 = QFormLayout(g1)
         self.dest_root = PathRow(s.dest_root, "dir", placeholder=r"例: D:\CamTrap（中継HDD/SSD。NASを直接指定してもよい）")
         self.nas_root = PathRow(s.nas_root, "dir", placeholder=r"例: \\DS2422\camtrap（空ならNAS転送なし）")
-        self.season_folder = QLineEdit(s.season_folder)
         f1.addRow("中継先（または最終保存先）", self.dest_root)
         f1.addRow("NASの最終保存先", self.nas_root)
-        f1.addRow("調査回（シーズン）のフォルダ名（任意。空なら保存先の直下）", self.season_folder)
+        f1.addRow("", QLabel("調査回（シーズン）ごとのフォルダ名は「1. 取り込み」画面で、野帳のファイルは「2. 地点名に変更」画面で指定します。"))
         lay.addWidget(g1)
 
         # --- カード内の対象 ---
@@ -95,42 +93,40 @@ class SettingsPage(QWidget):
         f3.addRow("除外するボリューム（カンマ区切り）", self.exclude)
         lay.addWidget(g3)
 
-        # --- 野帳 ---
-        g4 = QGroupBox("野帳（ファイルは「2. 地点名に変更」画面で選びます）")
+        # --- 野帳と地点名 ---
+        g4 = QGroupBox("野帳の列名と地点名の付け方")
         f4 = QFormLayout(g4)
-        self.sheet = QLineEdit(s.fieldnote_sheet)
-        self.sheet.setPlaceholderText("空なら最初のシート")
         self.col_season = QLineEdit(s.col_season)
         self.col_station = QLineEdit(s.col_station)
         self.col_type = QLineEdit(s.col_type)
         self.col_ret = QLineEdit(s.col_retrieval_sd)
-        self.default_type = QLineEdit(s.default_type)
         self.tail_match = QCheckBox("カードIDは末尾の数字で照合する（id.txt の 6_650 と野帳の 650 を同じとみなす）")
         self.tail_match.setChecked(s.card_id_match_tail_number)
-        f4.addRow("シート名", self.sheet)
-        f4.addRow("", self.tail_match)
         cols = QHBoxLayout()
         for lbl, w in (("Season", self.col_season), ("Station", self.col_station), ("Type", self.col_type),
                        ("回収SD", self.col_ret)):
             cols.addWidget(QLabel(lbl))
             cols.addWidget(w)
         f4.addRow("列名（Station と 回収SD は必須。Season と Type は野帳に無くてもよい。綴りの揺れは自動で読み替え）", cols)
-        f4.addRow("最初に選ぶ Type（任意）", self.default_type)
-        self.rules = QTableWidget(0, 4)
-        self.rules.setHorizontalHeaderLabels(["Type", "Seasonの接頭辞", "Stationの接頭辞", "ゼロ埋め桁数"])
-        self.rules.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        for t, r in s.type_rules.items():
-            self._add_rule_row(t, r)
-        btns = QHBoxLayout()
-        add = QPushButton("Type を追加")
-        add.clicked.connect(lambda: self._add_rule_row("", TypeRule()))
-        rm = QPushButton("選択行を削除")
-        rm.clicked.connect(lambda: self.rules.removeRow(self.rules.currentRow()))
-        btns.addWidget(add)
-        btns.addWidget(rm)
-        btns.addStretch(1)
-        f4.addRow("フォルダ名の整形ルール（任意。無ければ野帳の値をそのまま使う。例: Type N に N / BSN / 4 → N260710 / BSN0482）", self.rules)
-        f4.addRow("", btns)
+        f4.addRow("", self.tail_match)
+        self.station_prefix = QLineEdit(s.station_prefix)
+        self.station_prefix.setMaximumWidth(120)
+        self.station_prefix.setPlaceholderText("空なら数字だけ")
+        self.station_digits = QSpinBox()
+        self.station_digits.setRange(0, 10)
+        self.station_digits.setValue(int(s.station_digits))
+        self.station_example = QLabel("")
+        hs = QHBoxLayout()
+        hs.addWidget(QLabel("接頭辞"))
+        hs.addWidget(self.station_prefix)
+        hs.addWidget(QLabel("番号の桁数（0 ならそのまま）"))
+        hs.addWidget(self.station_digits)
+        hs.addWidget(self.station_example)
+        hs.addStretch(1)
+        f4.addRow("地点名（フォルダ名）の付け方: 野帳の Station が番号のとき", hs)
+        self.station_prefix.textChanged.connect(self._update_example)
+        self.station_digits.valueChanged.connect(self._update_example)
+        self._update_example()
         lay.addWidget(g4)
 
         # --- 保存 ---
@@ -142,11 +138,10 @@ class SettingsPage(QWidget):
         lay.addLayout(hb)
         lay.addStretch(1)
 
-    def _add_rule_row(self, t: str, r: TypeRule) -> None:
-        row = self.rules.rowCount()
-        self.rules.insertRow(row)
-        for c, v in enumerate([t, r.season_prefix, r.station_prefix, str(r.station_pad)]):
-            self.rules.setItem(row, c, QTableWidgetItem(v))
+    def _update_example(self) -> None:
+        pre = self.station_prefix.text().strip()
+        d = int(self.station_digits.value())
+        self.station_example.setText(f"例: 野帳の 482 → {format_station('482', pre, d)}、BSN730 → {format_station('BSN730', pre, d)}、Ridge-A → Ridge-A")
 
     @staticmethod
     def _split(text: str) -> list[str]:
@@ -156,7 +151,6 @@ class SettingsPage(QWidget):
         s = self.ctx.settings
         s.dest_root = self.dest_root.text()
         s.nas_root = self.nas_root.text()
-        s.season_folder = self.season_folder.text().strip()
         s.media_subdirs = self._split(self.media_subdirs.text()) or ["DCIM/100_BTCF"]
         s.media_recursive = self.media_recursive.isChecked()
         s.media_extensions = [e.lstrip(".").lower() for e in self._split(self.media_ext.text())] or ["mp4"]
@@ -173,27 +167,12 @@ class SettingsPage(QWidget):
         s.poll_interval_sec = float(self.poll.value())
         s.scan_roots = self._split(self.scan_roots.text())
         s.exclude_volumes = self._split(self.exclude.text())
-        s.fieldnote_sheet = self.sheet.text().strip()
         s.col_season = self.col_season.text().strip() or "Season"
         s.col_station = self.col_station.text().strip() or "Station"
         s.col_type = self.col_type.text().strip() or "Type"
         s.col_retrieval_sd = self.col_ret.text().strip() or "RetrievalSD"
         s.card_id_match_tail_number = self.tail_match.isChecked()
-        s.default_type = self.default_type.text().strip() or "N"
-        rules: dict[str, TypeRule] = {}
-        for r in range(self.rules.rowCount()):
-            def cell(c: int) -> str:
-                it = self.rules.item(r, c)
-                return it.text().strip() if it else ""
-            t = cell(0)
-            if not t:
-                continue
-            try:
-                pad = int(cell(3) or "4")
-            except ValueError:
-                pad = 4
-            rules[t] = TypeRule(season_prefix=cell(1), station_prefix=cell(2), station_pad=pad)
-        if rules:
-            s.type_rules = rules
+        s.station_prefix = self.station_prefix.text().strip()
+        s.station_digits = int(self.station_digits.value())
         self.ctx.save()
         QMessageBox.information(self, "設定", "保存しました。同時コピー枚数の変更はアプリの再起動後に反映されます。")
