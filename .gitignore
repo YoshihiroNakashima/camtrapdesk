@@ -11,3 +11,5 @@ dist/
 *.sqlite-shm
 .venv/
 camtrapdesk-setup.log
+tools/ffmpeg.exe
+tools/ffmpeg/

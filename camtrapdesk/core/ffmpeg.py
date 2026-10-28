@@ -27,36 +27,48 @@ def _creationflags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
 
 
-def find_ffmpeg(configured: str = "") -> str | None:
-    """ffmpeg の実行ファイルを探す: 設定 → アプリと同じフォルダ → imageio-ffmpeg 同梱 → PATH。"""
-    key = configured or ""
-    with _lock:
-        if key in _ffmpeg_cache:
-            return _ffmpeg_cache[key]
+def ffmpeg_candidates(configured: str = "") -> list[str]:
+    """探す順: 設定 → アプリのフォルダ（ffmpeg.exe、tools/ffmpeg.exe、tools/ffmpeg/bin/ffmpeg.exe）→ imageio-ffmpeg 同梱 → PATH。"""
     exe = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
     cands: list[str] = []
     if configured:
         cands.append(configured)
         if os.path.isdir(configured):
             cands.append(os.path.join(configured, exe))
-    base = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    cands.append(os.path.join(base, exe))
-    cands.append(os.path.join(base, "tools", exe))
+            cands.append(os.path.join(configured, "bin", exe))
+    if getattr(sys, "frozen", False):
+        bases = [os.path.dirname(sys.executable), getattr(sys, "_MEIPASS", "")]
+    else:
+        bases = [os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))]
+    for base in [b for b in bases if b]:
+        cands.append(os.path.join(base, exe))
+        cands.append(os.path.join(base, "tools", exe))
+        cands.append(os.path.join(base, "tools", "ffmpeg", exe))
+        cands.append(os.path.join(base, "tools", "ffmpeg", "bin", exe))
     try:
         import imageio_ffmpeg  # type: ignore
         cands.append(imageio_ffmpeg.get_ffmpeg_exe())
-    except Exception:
-        pass
+    except Exception as e:  # 同梱バイナリが無い環境など
+        cands.append(f"(imageio-ffmpeg: {e})")
     found = shutil.which("ffmpeg")
-    if found:
-        cands.append(found)
+    cands.append(found or "(PATH に ffmpeg なし)")
+    return cands
+
+
+def find_ffmpeg(configured: str = "") -> str | None:
+    """ffmpeg の実行ファイルを探す（見つからなければ None）。結果はプロセス内で覚える。"""
+    key = configured or ""
+    with _lock:
+        if key in _ffmpeg_cache:
+            return _ffmpeg_cache[key]
     result = None
-    for c in cands:
-        if c and os.path.isfile(c) and os.access(c, os.X_OK):
+    for c in ffmpeg_candidates(configured):
+        if c and not c.startswith("(") and os.path.isfile(c) and os.access(c, os.X_OK):
             result = c
             break
     with _lock:
-        _ffmpeg_cache[key] = result
+        if result is not None:
+            _ffmpeg_cache[key] = result   # 見つからなかった場合は覚えない（後から置けば次の確認で見つかる）
     return result
 
 

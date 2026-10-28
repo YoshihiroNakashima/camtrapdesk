@@ -193,11 +193,12 @@ class SettingsPage(QWidget):
         lay.addStretch(1)
 
     def _check_ffmpeg(self) -> None:
-        from ...core.ffmpeg import detect_encoder, find_ffmpeg
+        from ...core.ffmpeg import detect_encoder, ffmpeg_candidates, find_ffmpeg
         from PySide6.QtWidgets import QApplication
         path = find_ffmpeg(self.ffmpeg_path.text())
         if not path:
-            self.ffmpeg_result.setText("ffmpeg が見つかりません。配布版には同梱されています。開発環境では pip install imageio-ffmpeg か、ffmpeg.exe の場所を指定してください")
+            tried = "\n".join("  " + c for c in ffmpeg_candidates(self.ffmpeg_path.text()))
+            self.ffmpeg_result.setText("ffmpeg が見つかりません。ffmpeg.exe をアプリの tools フォルダに置くか、上の欄で場所を指定してください。\n探した場所:\n" + tried)
             return
         self.ffmpeg_result.setText(f"{path} を確認中…")
         QApplication.processEvents()
