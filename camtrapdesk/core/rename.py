@@ -88,9 +88,9 @@ def build_plan(root: str, nas_root: str | None, mapping: Mapping, ledger: L.Ledg
     if not os.path.isdir(season_dir):
         try:
             os.makedirs(season_dir, exist_ok=True)
-            issues.append(f"シーズンフォルダを作成しました（まだ取り込んだカードはありません）: {season_dir}")
+            issues.append(f"フォルダを作成しました（まだ取り込んだカードはありません）: {season_dir}")
         except OSError as e:
-            issues.append(f"シーズンフォルダを作成できません: {season_dir} ({e})")
+            issues.append(f"フォルダを作成できません: {season_dir} ({e})")
             return plan
 
     # フォルダ名 → どこにあるか

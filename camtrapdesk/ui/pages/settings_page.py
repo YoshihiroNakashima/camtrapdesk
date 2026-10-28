@@ -31,7 +31,7 @@ class SettingsPage(QWidget):
         self.nas_root = PathRow(s.nas_root, "dir", placeholder=r"例: \\DS2422\camtrap（空ならNAS転送なし）")
         f1.addRow("中継先（または最終保存先）", self.dest_root)
         f1.addRow("NASの最終保存先", self.nas_root)
-        f1.addRow("", QLabel("調査回（シーズン）ごとのフォルダ名は「1. 取り込み」画面で、野帳のファイルは「2. 地点名に変更」画面で指定します。"))
+        f1.addRow("", QLabel("取り込み先のフォルダ名（調査回や調査地などの区切り）は「1. 取り込み」画面で、野帳のファイルは「2. 地点名に変更」画面で指定します。"))
         lay.addWidget(g1)
 
         # --- カード内の対象 ---

@@ -49,7 +49,7 @@ class RenamePage(QWidget):
         h4 = QHBoxLayout()
         self.folder_combo = QComboBox()
         self.folder_combo.setMinimumWidth(220)
-        self.folder_combo.setToolTip("保存先（中継）と NAS にあるシーズンフォルダの一覧。通常は取り込み画面で指定した今回のフォルダ")
+        self.folder_combo.setToolTip("保存先（中継）と NAS にある区切りフォルダ（調査回や調査地）の一覧。通常は取り込み画面で指定した今回のフォルダ")
         self.folder_refresh = QPushButton("一覧を更新")
         self.folder_refresh.clicked.connect(self.refresh_folders)
         h4.addWidget(self.folder_combo)
@@ -90,7 +90,7 @@ class RenamePage(QWidget):
         self.refresh_folders()
 
     def refresh_folders(self) -> None:
-        """保存先と NAS にあるシーズンフォルダを一覧にし、取り込み画面で指定中のものを選ぶ。"""
+        """保存先と NAS にある区切りフォルダを一覧にし、取り込み画面で指定中のものを選ぶ。"""
         import os
         s = self.ctx.settings
         names: set[str] = set()
@@ -234,7 +234,7 @@ class RenamePage(QWidget):
             set_row(self.table, r, [R.ACTION_LABELS.get(it.action, it.action), it.card_id, it.src_dir_name,
                                     it.dst_dir_name, it.where, str(e.row_no) if e else "", e.date if e else "",
                                     e.state if e else "", note], color)
-        lines = [f"シーズンフォルダ: {plan.season_dir}" + (f"　／　NAS: {plan.nas_season_dir}" if plan.nas_season_dir else ""),
+        lines = [f"変更するフォルダ: {plan.season_dir}" + (f"　／　NAS: {plan.nas_season_dir}" if plan.nas_season_dir else ""),
                  f"変更 {plan.count(R.A_RENAME)} / 保留 {plan.count(R.A_BLOCKED)} / 変更先が既存 {plan.count(R.A_TARGET_EXISTS)}"
                  f" / NAS転送中 {plan.count(R.A_SYNCING)} / フォルダ無し {plan.count(R.A_MISSING)}"
                  f" / 野帳に無い {plan.count(R.A_UNMAPPED)} / 変更済み {plan.count(R.A_ALREADY)}"]

@@ -29,9 +29,9 @@ class IngestPage(QWidget):
         box = QGroupBox("取り込み先")
         form = QFormLayout(box)
         self.season_edit = QLineEdit(s.season_folder)
-        self.season_edit.setPlaceholderText("任意。例: 2026-10 や N260710。取り込んだカードはこのフォルダの下に入ります（空なら保存先の直下）")
+        self.season_edit.setPlaceholderText("任意。同じ調査を繰り返すなら調査回ごと（例: N260710）、一度きりなら調査地名（例: 保尊崎）。空なら保存先の直下")
         self.season_edit.editingFinished.connect(self._season_changed)
-        form.addRow("調査回（シーズン）のフォルダ名", self.season_edit)
+        form.addRow("取り込み先のフォルダ名（調査の区切り）", self.season_edit)
         self.dest_label = QLabel()
         form.addRow("保存先（中継）", self.dest_label)
         self.nas_label = QLabel()
@@ -138,13 +138,13 @@ class IngestPage(QWidget):
         self._ensure_season_dir()
 
     def _ensure_season_dir(self) -> None:
-        """保存先にシーズンフォルダを先に作っておく（名前変更画面などから見えるように）。"""
+        """保存先に区切りのフォルダを先に作っておく（名前変更画面などから見えるように）。"""
         s = self.ctx.settings
         if s.dest_root and s.season_folder.strip() and os.path.isdir(s.dest_root):
             try:
                 os.makedirs(os.path.join(s.dest_root, s.season_folder), exist_ok=True)
             except OSError as e:
-                self._append_log(f"シーズンフォルダを作成できません: {e}")
+                self._append_log(f"取り込み先のフォルダを作成できません: {e}")
 
     def _auto_toggled(self, on: bool) -> None:
         self.ctx.settings.auto_start_ingest = on
