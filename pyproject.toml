@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pyinstaller>=6"]
+dev = ["pytest>=7", "pytest-timeout>=2", "pyinstaller>=6"]
 
 [project.scripts]
 camtrapdesk = "camtrapdesk.__main__:main"

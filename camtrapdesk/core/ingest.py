@@ -11,6 +11,7 @@ import shutil
 import threading
 import time
 import traceback
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Callable
@@ -95,6 +96,8 @@ class CardJob:
 class IngestManager:
     """ボリュームを監視し、カードを検出して取り込むバックグラウンド処理。"""
 
+    _instances: "weakref.WeakSet[IngestManager]" = weakref.WeakSet()   # テストや終了処理で止め忘れを拾うため
+
     def __init__(self, get_settings: Callable[[], Settings], ledger: L.Ledger,
                  on_update: Callable[[CardJob], None], on_log: Callable[[str], None],
                  on_batch_done: Callable[[int], None] | None = None,
@@ -117,6 +120,7 @@ class IngestManager:
         self._active = 0
         self._batch_counted = True
         self._skipped_reported: set[str] = set()   # id.txt が無い等で対象外にしたボリューム（1回だけ記録）
+        IngestManager._instances.add(self)
         self.others: dict[str, tuple[Volume, str]] = {}   # カードとして扱えないリムーバブルボリュームと理由
         self.suggested_ids: dict[str, str] = {}           # id.txt の無いボリューム → 前回の ID（ボリュームシリアルから）
         self._remembered: set[tuple[str, str]] = set()    # 今回の起動で台帳に書いた (シリアル, ID)

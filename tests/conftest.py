@@ -40,3 +40,15 @@ def env(tmp_path):
                            scan_roots=[str(cards)], concurrency=2, poll_interval_sec=0.2)
     ledger = Ledger(str(tmp_path / "ledger.sqlite"))
     return {"tmp": tmp_path, "cards": cards, "dest": dest, "nas": nas, "settings": s, "ledger": ledger}
+
+
+@pytest.fixture(autouse=True)
+def _stop_stray_workers():
+    """テストが途中で失敗しても、取り込みのワーカースレッドが残って pytest の終了を止めないようにする。"""
+    yield
+    from camtrapdesk.core.ingest import IngestManager
+    for m in list(IngestManager._instances):
+        try:
+            m.stop()
+        except Exception:
+            pass
