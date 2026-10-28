@@ -22,12 +22,15 @@ jobs:
   build:
     needs: test
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
             artifact: camtrapdesk-windows
-          - os: macos-latest
-            artifact: camtrapdesk-macos
+          - os: macos-latest          # Apple Silicon (M1 以降)
+            artifact: camtrapdesk-macos-apple-silicon
+          - os: macos-15-intel        # Intel Mac
+            artifact: camtrapdesk-macos-intel
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -37,20 +40,22 @@ jobs:
       - run: pip install -e ".[dev]"
       - name: Build (Windows)
         if: runner.os == 'Windows'
-        run: >
-          pyinstaller --noconfirm --clean --windowed --onefile --name camtrapdesk
-          --collect-all openpyxl camtrapdesk/__main__.py
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --clean --windowed --onefile --name camtrapdesk --paths . --collect-all openpyxl tools/entry.py
+          mv dist/camtrapdesk.exe dist/camtrapdesk-windows.exe
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: |
-          pyinstaller --noconfirm --clean --windowed --name camtrapdesk --collect-all openpyxl camtrapdesk/__main__.py
-          cd dist && zip -r -y camtrapdesk-macos.zip camtrapdesk.app
+          pyinstaller --noconfirm --clean --windowed --name camtrapdesk --paths . --collect-all openpyxl tools/entry.py
+          # 署名していないので、初回は「システム設定 > プライバシーとセキュリティ」で許可が必要（README 参照）
+          cd dist && ditto -c -k --sequesterRsrc --keepParent camtrapdesk.app ../${{ matrix.artifact }}.zip
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: |
-            dist/camtrapdesk.exe
-            dist/camtrapdesk-macos.zip
+            dist/camtrapdesk-windows.exe
+            ${{ matrix.artifact }}.zip
           if-no-files-found: ignore
 
   release:
@@ -67,5 +72,10 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/camtrapdesk.exe
-            dist/camtrapdesk-macos.zip
+            dist/camtrapdesk-windows.exe
+            dist/camtrapdesk-macos-apple-silicon.zip
+            dist/camtrapdesk-macos-intel.zip
+          body: |
+            - Windows: `camtrapdesk-windows.exe` をダウンロードしてダブルクリック（Python 不要）。初回は SmartScreen の「詳細情報」→「実行」。
+            - Mac (M1 以降): `camtrapdesk-macos-apple-silicon.zip` を展開し、camtrapdesk.app をアプリケーションに入れる。初回は「システム設定 > プライバシーとセキュリティ」で「このまま開く」。
+            - Mac (Intel): `camtrapdesk-macos-intel.zip`。手順は同じ。

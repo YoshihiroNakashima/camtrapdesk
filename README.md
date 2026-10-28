@@ -33,33 +33,48 @@
 - カード内の対象フォルダは既定 `DCIM/100_BTCF`（Browning）。そのフォルダが無いカードは `DCIM` 以下をすべて探すので、他機種でもそのまま動く。設定で変えられる。
 - NAS が無ければ NAS 欄を空にする。保存先がそのまま最終保存先になり、削除の条件も保存先での検証済みになる。
 
-## 起動（ダブルクリック）
+## 配布と起動
+
+### 学生に配る（Python 不要）
+
+GitHub の Releases ページから、OS に合うものを 1 つダウンロードする。
+
+- **Windows**: `camtrapdesk-windows.exe`。好きな場所に置いてダブルクリックするだけ。初回は Windows の SmartScreen が「WindowsによってPCが保護されました」と出すので、「詳細情報」→「実行」。1 ファイルに全部入っているので、起動に数秒かかる（展開のため）。
+- **Mac（M1 以降）**: `camtrapdesk-macos-apple-silicon.zip`。展開して `camtrapdesk.app` を「アプリケーション」に入れる。
+- **Mac（Intel）**: `camtrapdesk-macos-intel.zip`。同じ手順。
+
+Mac は署名していないため、初回に「開発元を確認できないため開けません」と出る。閉じてから「システム設定」→「プライバシーとセキュリティ」を下にスクロールし、「"camtrapdesk" は…ブロックされました」の横の「このまま開く」を押す（macOS 15 以降は右クリック→「開く」では通らない）。ターミナルで `xattr -dr com.apple.quarantine /Applications/camtrapdesk.app` としてもよい。毎回この手間を無くすには Apple Developer Program（年額）で署名と公証をする。
+
+設定と台帳は PC ごとに `%APPDATA%\camtrapdesk`（Mac は `~/Library/Application Support/camtrapdesk`）に入る。複数の PC で取り込んだ分は、保存先の manifest.json から台帳を再構築すれば 1 台にまとめられる（「台帳」画面）。新しい版を配るときは、新しいタグを付けて Release を作り、学生にダウンロードし直してもらう。
+
+### Release の作り方（開発者）
+
+1. GitHub にリポジトリを作り、この内容を push する（`.venv` や `__pycache__` は `.gitignore` 済み）。
+2. バージョンを上げる（`camtrapdesk/__init__.py` と `pyproject.toml`）。
+3. `git tag v0.1.0 && git push origin v0.1.0`。GitHub Actions（`.github/workflows/build.yml`）がテストを実行し、Windows の exe と Mac 2 種（Apple Silicon / Intel）の app を作って、Releases に添付する（15〜20 分）。
+4. 配布ページの URL（`https://github.com/<ユーザー名>/camtrapdesk/releases/latest`）を学生に知らせる。
+
+push だけでも（タグ無し）テストとビルドは走り、Actions の画面の Artifacts から取れる。手元で作る場合:
+
+```bash
+pip install -e ".[dev]"
+pyinstaller --noconfirm --clean --windowed --onefile --name camtrapdesk --paths . --collect-all openpyxl tools/entry.py   # Windows
+pyinstaller --noconfirm --clean --windowed --name camtrapdesk --paths . --collect-all openpyxl tools/entry.py             # Mac → dist/camtrapdesk.app
+```
+
+### フォルダごと渡して起動する（Python が入っている PC）
 
 - Windows: `起動.bat` をダブルクリック。初回だけ、フォルダ内に `.venv` を作って PySide6 などを取得する（数分。進み具合は黒い画面に出る）。2回目以降はすぐ起動する。Python 3.9 以上が入っていない場合はその旨が表示され python.org が開くので、インストール（「Add python.exe to PATH」にチェック）後にもう一度実行する。
-- macOS: `起動.command` をダブルクリック（初回に「開発元を確認できない」と出たら右クリック→「開く」）。
+- macOS: `起動.command` をダブルクリック。
 
-実体は `tools/launch.py` で、表示は Python 側で行うのでコンソールの文字コードに左右されない。学生のPCに配る場合は、GitHub Actions が作る `camtrapdesk.exe`（Python 不要）を使う。
+実体は `tools/launch.py` で、表示は Python 側で行うのでコンソールの文字コードに左右されない。
 
-## 使い方（開発環境）
+### 開発環境
 
 ```bash
 pip install -e ".[dev]"
 python -m camtrapdesk
-```
-
-テスト:
-
-```bash
-QT_QPA_PLATFORM=offscreen python -m pytest -q
-```
-
-配布用の実行ファイルは GitHub Actions（`.github/workflows/build.yml`）が Windows の `camtrapdesk.exe` と macOS の `camtrapdesk.app` を作る。`v0.1.0` のようなタグを付けて push すると Release に添付される。macOS では署名していないため、初回は右クリック→「開く」が必要。
-
-ローカルで作る場合:
-
-```bash
-pip install pyinstaller
-pyinstaller --windowed --onefile --name camtrapdesk --collect-all openpyxl camtrapdesk/__main__.py
+QT_QPA_PLATFORM=offscreen python -m pytest -q   # テスト
 ```
 
 ## 設定ファイルと台帳の場所

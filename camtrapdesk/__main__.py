@@ -2,7 +2,8 @@ import sys
 
 
 def main() -> None:
-    from .app import run
+    # 絶対インポートにしておく（PyInstaller でスクリプトとして実行されても動くように）
+    from camtrapdesk.app import run
     sys.exit(run())
 
 
