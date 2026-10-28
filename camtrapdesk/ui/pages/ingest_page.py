@@ -40,13 +40,10 @@ class IngestPage(QWidget):
 
         # --- 操作 ---
         ops = QHBoxLayout()
-        self.auto_chk = QCheckBox("カードを挿したら自動で開始")
-        self.auto_chk.setChecked(s.auto_start_ingest)
-        self.auto_chk.toggled.connect(self._auto_toggled)
-        self.pause_btn = QPushButton("一時停止")
-        self.pause_btn.setCheckable(True)
-        self.pause_btn.toggled.connect(self._pause_toggled)
-        self.start_btn = QPushButton("検出済みをすべて開始")
+        self.arm_btn = QPushButton("取り込みを開始")
+        self.arm_btn.setToolTip("保存先・フォルダ名・NAS を確認してから、挿さっているカードを始めます。以後、挿したカードは自動で始まります")
+        self.arm_btn.clicked.connect(self._arm_clicked)
+        self.start_btn = QPushButton("エラー・スキップ分をやり直す")
         self.start_btn.clicked.connect(self._start_all)
         self.rescan_btn = QPushButton("再スキャン")
         self.rescan_btn.clicked.connect(lambda: self.ctx.ingest.rescan_now())
@@ -55,7 +52,7 @@ class IngestPage(QWidget):
         self.diag_btn = QPushButton("診断")
         self.diag_btn.setToolTip("Windows が認識している全ボリュームと id.txt の状態を一覧にします")
         self.diag_btn.clicked.connect(self._diagnostics)
-        for w in (self.auto_chk, self.pause_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.diag_btn):
+        for w in (self.arm_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.diag_btn):
             ops.addWidget(w)
         ops.addStretch(1)
         self.summary_label = QLabel("")
@@ -101,6 +98,8 @@ class IngestPage(QWidget):
         ctx.nas_progress.connect(self._on_nas_progress)
         ctx.convert_status.connect(self._on_convert_status)
         ctx.settings_changed.connect(self._refresh_labels)
+        ctx.settings_changed.connect(self._refresh_arm_button)
+        self._refresh_arm_button()
         self._refresh_labels()
 
         self.timer = QTimer(self)
@@ -146,13 +145,38 @@ class IngestPage(QWidget):
             except OSError as e:
                 self._append_log(f"取り込み先のフォルダを作成できません: {e}")
 
-    def _auto_toggled(self, on: bool) -> None:
-        self.ctx.settings.auto_start_ingest = on
-        self.ctx.save()
+    def _arm_clicked(self) -> None:
+        ing = self.ctx.ingest
+        if ing.armed:
+            ing.disarm()
+            self._refresh_arm_button()
+            self._append_log("新しいカードの自動開始を止めました（進行中のコピーは続きます）")
+            return
+        s = self.ctx.settings
+        if not s.dest_root:
+            QMessageBox.warning(self, "取り込みを開始", "保存先（中継先）が未設定です。「設定」で指定してください。")
+            return
+        free = I.free_bytes(s.dest_root) if s.dest_root else None
+        waiting = [j for j in ing.jobs.values() if j.state == I.S_DETECTED and not j.card.problems]
+        total = sum(j.card.total_bytes for j in waiting)
+        lines = [f"保存先（中継）: {s.dest_root}" + (f"　空き {human_size(free)}" if free is not None else "　（見つかりません）"),
+                 f"取り込み先のフォルダ: {s.season_folder.strip() or '（保存先の直下）'}",
+                 f"NAS: {s.nas_root or '（転送しない）'}",
+                 f"動画の変換: {'する（' + ', '.join(s.convert_extensions) + ' → mp4）' if s.convert_enabled else 'しない'}",
+                 "",
+                 f"いま開始待ちのカード: {len(waiting)} 枚（{human_size(total)}）。"
+                 "開始すると、これ以後に挿したカードも自動で始まります。\n\nこの内容で始めますか？"]
+        if QMessageBox.question(self, "取り込みを開始", "\n".join(lines)) != QMessageBox.StandardButton.Yes:
+            return
+        self._ensure_season_dir()
+        n = ing.arm()
+        self._refresh_arm_button()
+        self._append_log(f"取り込みを開始（{n} 枚）。以後、挿したカードは自動で始まります")
 
-    def _pause_toggled(self, on: bool) -> None:
-        self.ctx.ingest.paused = on
-        self.pause_btn.setText("一時停止中（押すと再開）" if on else "一時停止")
+    def _refresh_arm_button(self) -> None:
+        armed = self.ctx.ingest.armed
+        self.arm_btn.setText("自動開始を止める" if armed else "取り込みを開始")
+        self.arm_btn.setStyleSheet("" if armed else "font-weight: bold;")
 
     def _nas_pause_toggled(self, on: bool) -> None:
         self.ctx.nas.paused = on

@@ -53,7 +53,6 @@ class Settings:
     staging_cleanup_after_nas: bool = False  # NASで検証済みになったカードは中継のコピーを消す（中継の容量を小さくしたいとき）
     min_free_gb: float = 20.0              # 中継の空きがカード容量＋この余裕を下回るなら、空くまでコピーを待たせる
     poll_interval_sec: float = 3.0
-    auto_start_ingest: bool = True
     # --- 動画の変換（任意）: 中継先で AVI などを H.264 の mp4 にしてから NAS へ送る ---
     convert_enabled: bool = False
     convert_extensions: list[str] = field(default_factory=lambda: ["avi"])   # 変換する拡張子（mp4 は対象外）

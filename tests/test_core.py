@@ -20,7 +20,7 @@ from conftest import make_card, nakashima_settings
 def run_ingest(env, timeout=30):
     s, ledger = env["settings"], env["ledger"]
     logs = []
-    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append)
+    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append, armed=True)
     mgr.start()
     t0 = time.time()
     while time.time() - t0 < timeout:
@@ -367,7 +367,7 @@ def test_ingest_waits_for_staging_space(env, monkeypatch):
     s.min_free_gb = 0
     make_card(env["cards"], "264", n_files=2)
     logs = []
-    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append)
+    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append, armed=True)
     mgr.start()
     mgr.rescan_now()
     t0 = time.time()
@@ -408,7 +408,7 @@ def test_switch_staging_ssd_while_waiting(env, monkeypatch):
     ssd_b.mkdir()
     monkeypatch.setattr(I, "free_bytes", lambda path: 1_000 if os.path.normpath(path) == os.path.normpath(str(ssd_a)) else 10**12)
     make_card(env["cards"], "264", n_files=2)
-    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=lambda m: None)
+    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=lambda m: None, armed=True)
     mgr.start()
     mgr.rescan_now()
     assert _wait_until(lambda: any(j.state == I.S_WAITING for j in mgr.jobs.values()))
@@ -445,7 +445,7 @@ def test_no_space_mid_copy_resumes_after_space_returns(env, monkeypatch):
     monkeypatch.setattr(I, "copy_with_hash", flaky)
     make_card(env["cards"], "264", n_files=3)
     logs = []
-    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append)
+    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append, armed=True)
     mgr.start()
     mgr.rescan_now()
     job = None
@@ -670,7 +670,7 @@ def test_lost_id_file_is_suggested_from_volume_serial(env, monkeypatch):
     assert ledger.card_id_for_serial("1A2B-3C4D")[0] == "650"
     # id.txt を消す（フォーマットではないのでシリアルは同じ）
     os.remove(os.path.join(root, "id.txt"))
-    mgr2 = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=lambda m: None)
+    mgr2 = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=lambda m: None, armed=True)
     mgr2.rescan_now()
     assert not mgr2.jobs
     (key, (v, reason)), = mgr2.others.items()
@@ -680,3 +680,31 @@ def test_lost_id_file_is_suggested_from_volume_serial(env, monkeypatch):
     mgr2.rescan_now()
     assert {j.card.card_id for j in mgr2.jobs.values()} == {"650"}
     mgr2.stop()
+
+
+def test_cards_wait_until_start_is_confirmed(env):
+    """起動直後は、挿したカードを勝手にコピーしない。「取り込みを開始」（arm）で始まり、以後は自動で始まる。"""
+    from camtrapdesk.core import ingest as I
+    s, ledger = env["settings"], env["ledger"]
+    make_card(env["cards"], "1", n_files=2)
+    logs = []
+    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append)
+    mgr.start()
+    mgr.rescan_now()
+    job = next(iter(mgr.jobs.values()))
+    assert job.state == I.S_DETECTED and "取り込みを開始" in job.message
+    time.sleep(0.5)
+    assert job.state == I.S_DETECTED and not (env["dest"] / "N260710" / "1").exists()
+    assert mgr.arm() == 1
+    assert _wait_until(lambda: job.state == S_DONE), (job.state, job.message)
+    make_card(env["cards"], "2", n_files=2)          # 開始後に挿したカードは自動で始まる
+    mgr.rescan_now()
+    job2 = [j for j in mgr.jobs.values() if j.card.card_id == "2"][0]
+    assert _wait_until(lambda: job2.state == S_DONE), (job2.state, job2.message)
+    mgr.disarm()
+    make_card(env["cards"], "3", n_files=2)
+    mgr.rescan_now()
+    job3 = [j for j in mgr.jobs.values() if j.card.card_id == "3"][0]
+    time.sleep(0.5)
+    assert job3.state == I.S_DETECTED
+    mgr.stop()

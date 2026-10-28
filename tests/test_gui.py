@@ -57,8 +57,17 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
     win.show()
     ctx.start_background()
 
-    # 取り込みが終わるまで
+    # 起動直後は開始待ち。「取り込みを開始」（確認ダイアログで Yes）で始まる
     ingest_page = win.page(IngestPage)
+    for _ in range(50):
+        _pump(app, 0.2)
+        if len(ctx.ingest.jobs) == 2:
+            break
+    assert all(j.state == I.S_DETECTED for j in ctx.ingest.jobs.values())
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    ingest_page._arm_clicked()
+    assert ctx.ingest.armed and ingest_page.arm_btn.text() == "自動開始を止める"
+
     for _ in range(100):
         _pump(app, 0.2)
         jobs = list(ctx.ingest.jobs.values())
@@ -83,7 +92,6 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
     assert rename_page.season_combo.currentText() == "260710"
     rename_page.dry_run()
     assert rename_page.plan and rename_page.plan.count("rename") == 2
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     rename_page.apply()
     # 中継と NAS の両方が地点名になる（中継のコピーは既定で残す）
     assert (dest / "N260710" / "BSN0592").is_dir() and (nas / "N260710" / "BSN0592").is_dir()

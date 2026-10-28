@@ -34,7 +34,7 @@ S_ERROR = "error"
 S_REMOVED = "removed"        # 処理中に抜かれた
 
 STATE_LABELS = {
-    S_DETECTED: "検出",
+    S_DETECTED: "検出（開始待ち）",
     S_QUEUED: "待機中",
     S_WAITING: "空き待ち",
     S_COPYING: "コピー中",
@@ -98,8 +98,12 @@ class IngestManager:
     def __init__(self, get_settings: Callable[[], Settings], ledger: L.Ledger,
                  on_update: Callable[[CardJob], None], on_log: Callable[[str], None],
                  on_batch_done: Callable[[int], None] | None = None,
-                 reader_group: Callable[[Volume], str] | None = None):
+                 reader_group: Callable[[Volume], str] | None = None,
+                 armed: bool = False):
         self.get_settings = get_settings
+        # armed: 「取り込みを開始」で保存先などを確認してもらってから、挿したカードを自動で始める。
+        # 起動直後は False で、検出したカードは「開始待ち」で止まる（設定が違うまま勝手にコピーしないため）
+        self.armed = armed
         self.reader_group = reader_group   # ボリューム → リーダーの識別（同じリーダーに並列が偏らないように順番を組む）
         self.ledger = ledger
         self.on_update = on_update
@@ -112,7 +116,6 @@ class IngestManager:
         self._pool: ThreadPoolExecutor | None = None
         self._active = 0
         self._batch_counted = True
-        self.paused = False
         self._skipped_reported: set[str] = set()   # id.txt が無い等で対象外にしたボリューム（1回だけ記録）
         self.others: dict[str, tuple[Volume, str]] = {}   # カードとして扱えないリムーバブルボリュームと理由
         self.suggested_ids: dict[str, str] = {}           # id.txt の無いボリューム → 前回の ID（ボリュームシリアルから）
@@ -140,6 +143,21 @@ class IngestManager:
     def active_count(self) -> int:
         with self._lock:
             return sum(1 for j in self.jobs.values() if j.state in (S_QUEUED, S_COPYING, S_VERIFYING))
+
+    def arm(self) -> int:
+        """自動開始を有効にし、いま開始待ちのカードをすべて始める。戻り値は始めた枚数。"""
+        self.armed = True
+        n = 0
+        with self._lock:
+            keys = [k for k, j in self.jobs.items() if j.state == S_DETECTED and not j.card.problems]
+        for k in keys:
+            self.enqueue(k)
+            n += 1
+        return n
+
+    def disarm(self) -> None:
+        """新しく挿したカードの自動開始を止める（進行中のコピーは続く）。"""
+        self.armed = False
 
     def enqueue(self, key: str) -> None:
         with self._lock:
@@ -251,10 +269,12 @@ class IngestManager:
             self.on_update(job)
             if job.state == S_ERROR:
                 self.on_log(f"[{job.card.card_id}] {job.message}")
-            elif s.auto_start_ingest and not self.paused:
+            elif self.armed:
                 self.enqueue(job.key)
             else:
-                self.on_log(f"[{job.card.card_id}] 検出（{job.card.n_files}ファイル, {job.card.total_bytes/1e9:.2f} GB）")
+                job.message = "「取り込みを開始」を押すと始まります（保存先とフォルダ名を確認してから）"
+                self.on_update(job)
+                self.on_log(f"[{job.card.card_id}] 検出（{job.card.n_files}ファイル, {job.card.total_bytes/1e9:.2f} GB）。開始待ち")
         self._check_batch_done()
 
     def _interleave(self, jobs: list[CardJob]) -> list[CardJob]:

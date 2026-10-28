@@ -44,6 +44,11 @@ class AppContext(QObject):
                                    on_ingest_done=lambda _iid: self.nas.wake())
         # 取り込みが1枚終わるたびに変換係と NAS 転送係を起こす（待ち時間なしで始める）
         self.job_updated.connect(self._maybe_wake_nas)
+        self._dest_sig = self._destination_signature()
+
+    def _destination_signature(self) -> tuple:
+        s = self.settings
+        return (s.dest_root, s.nas_root, s.season_folder.strip(), s.convert_enabled, tuple(s.media_subdirs))
 
     def _maybe_wake_nas(self, job: CardJob) -> None:
         from ..core.ingest import S_DONE
@@ -79,6 +84,13 @@ class AppContext(QObject):
         self._apply_match_mode()
         self.converter.encoder = None   # エンコーダの指定が変わったかもしれないので選び直す
         self.converter.wake()
+        sig = self._destination_signature()
+        if sig != self._dest_sig:
+            self._dest_sig = sig
+            if self.ingest.armed:
+                # 保存先やフォルダ名が変わったら、確認してもらうまで新しいカードを自動で始めない
+                self.ingest.disarm()
+                self.log_message.emit("保存先・フォルダ名などの設定が変わったので、新しいカードの自動開始を止めました。内容を確認して「取り込みを開始」を押してください")
         self.settings_changed.emit()
 
     def _apply_match_mode(self) -> None:
