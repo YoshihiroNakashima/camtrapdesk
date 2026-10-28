@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QListWidgetItem
 
 from .. import __version__
 from .context import AppContext
+from .pages.batch_convert_page import BatchConvertPage
 from .pages.clear_page import ClearPage
 from .pages.id_page import IdPage
 from .pages.ingest_page import IngestPage
@@ -61,6 +62,8 @@ class MainWindow(QMainWindow):
         self._add_page("1. 取り込み", IngestPage(ctx), "挿したカードを保存先にコピーして検証し、NASへ転送します")
         self._add_page("2. 地点名に変更", RenamePage(ctx), "野帳の回収SD列をもとに、カードIDのフォルダ名を地点名にします")
         self._add_page("3. カードを消す", ClearPage(ctx), "保存先（NAS）と照合できたカードの動画だけを削除します")
+        self._add_header("保存済みのデータ（任意）")
+        self._add_page("動画を mp4 に変換", BatchConvertPage(ctx), "NAS や中継にすでにあるフォルダの AVI を後から mp4 に変換して容量を減らします")
         self._add_header("記録・設定")
         self._add_page("台帳", LedgerPage(ctx), "取り込みの記録")
         self._add_page("設定", SettingsPage(ctx))
@@ -126,7 +129,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QMessageBox
         from ..core import ingest as I
         active = [j for j in self.ctx.ingest.jobs.values() if j.state in (I.S_QUEUED, I.S_COPYING, I.S_VERIFYING)]
-        if active or self.ctx.nas.current or self.ctx.converter.current:
+        if active or self.ctx.nas.current or self.ctx.converter.current or self.ctx.batch.running:
             parts = []
             if active:
                 parts.append(f"カードのコピーが {len(active)} 枚進行中")
@@ -134,6 +137,9 @@ class MainWindow(QMainWindow):
                 parts.append(f"mp4 への変換中（{self.ctx.converter.current}）")
             if self.ctx.nas.current:
                 parts.append(f"NASへの転送中（{self.ctx.nas.current}）")
+            if self.ctx.batch.running:
+                st = self.ctx.batch.snapshot()
+                parts.append(f"保存済み動画の mp4 への変換中（{st.n_done}/{st.n_total} ファイル）")
             msg = "、".join(parts) + "です。\n終了すると途中のファイルは次回起動時にやり直します。終了しますか？"
             if QMessageBox.question(self, "終了の確認", msg) != QMessageBox.StandardButton.Yes:
                 e.ignore()

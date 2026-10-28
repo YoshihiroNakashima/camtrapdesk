@@ -167,10 +167,38 @@ def detect_encoder(ffmpeg: str, preferred: str = "auto") -> str:
     return chosen
 
 
+def _run_cancellable(args: list[str], timeout: float, stop: "threading.Event | None") -> tuple[int, str]:
+    """ffmpeg を走らせ、stop が立ったら途中で止める。(終了コード, stderr) を返す。中止は -1、時間切れは -2。"""
+    import time as _t
+    p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                         creationflags=_creationflags())
+    buf: list[bytes] = []
+    # stderr はパイプが詰まらないよう別スレッドで読み切る（-v error なので量は少ない）
+    reader = threading.Thread(target=lambda: buf.append(p.stderr.read() if p.stderr else b""), daemon=True)
+    reader.start()
+    t0 = _t.time()
+    code: int | None = None
+    while code is None:
+        try:
+            code = p.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            if stop is not None and stop.is_set():
+                p.kill()
+                p.wait()
+                code = -1
+            elif _t.time() - t0 > timeout:
+                p.kill()
+                p.wait()
+                code = -2
+    reader.join(timeout=5)
+    err = b"".join(buf).decode("utf-8", errors="replace")
+    return code, err
+
+
 def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
-                   threads: int = 0) -> tuple[bool, str]:
+                   threads: int = 0, stop: "threading.Event | None" = None) -> tuple[bool, str]:
     """src を H.264/AAC の mp4 として dst に書く。dst は .part などの一時名で呼び、呼び出し側で改名する。
-    終わったら長さを照合して (成功, メッセージ) を返す。"""
+    終わったら長さを照合して (成功, メッセージ) を返す。stop（threading.Event）が立つと ffmpeg を止めて失敗を返す。"""
     info = probe(ffmpeg, src)
     if info is None:
         return False, "元の動画を読み取れません（壊れている可能性）"
@@ -184,14 +212,16 @@ def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
         args += ["-threads", str(threads)]
     args += ["-map_metadata", "0", "-movflags", "+faststart", "-f", "mp4", dst]
     try:
-        r = _run(args, timeout=max(600.0, info.duration * 20 + 120))
-    except subprocess.TimeoutExpired:
-        return False, "変換が時間内に終わりませんでした"
+        code, stderr = _run_cancellable(args, max(600.0, info.duration * 20 + 120), stop)
     except OSError as e:
         return False, f"ffmpeg を実行できません: {e}"
-    if r.returncode != 0:
-        err = (r.stderr or "").strip().splitlines()
-        return False, "ffmpeg エラー: " + (err[-1] if err else f"code {r.returncode}")
+    if code == -1:
+        return False, "中止しました"
+    if code == -2:
+        return False, "変換が時間内に終わりませんでした"
+    if code != 0:
+        err = stderr.strip().splitlines()
+        return False, "ffmpeg エラー: " + (err[-1] if err else f"code {code}")
     if not os.path.isfile(dst) or os.path.getsize(dst) == 0:
         return False, "変換後のファイルが空です"
     out = probe(ffmpeg, dst)

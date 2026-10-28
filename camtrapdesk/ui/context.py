@@ -7,6 +7,7 @@ import os
 from PySide6.QtCore import QObject, Signal
 
 from ..config import Settings, config_dir, load_settings, save_settings
+from ..core.batch_convert import BatchConverter
 from ..core.convert import Converter
 from ..core.ingest import CardJob, IngestManager
 from ..core.ledger import Ledger
@@ -21,6 +22,9 @@ class AppContext(QObject):
     nas_status = Signal(str)
     nas_progress = Signal(str, float)
     convert_status = Signal(str)
+    batch_status = Signal(str)          # 保存済みの一括変換の状況（1行）
+    batch_log = Signal(str)
+    batch_done = Signal(object)         # BatchStats
     settings_changed = Signal()
 
     def __init__(self):
@@ -42,6 +46,10 @@ class AppContext(QObject):
                                    on_status=self.convert_status.emit,
                                    on_log=self.log_message.emit,
                                    on_ingest_done=lambda _iid: self.nas.wake())
+        self.batch = BatchConverter(self.get_settings, self.ledger,
+                                    on_status=self.batch_status.emit,
+                                    on_log=self.batch_log.emit,
+                                    on_done=self.batch_done.emit)
         # 取り込みが1枚終わるたびに変換係と NAS 転送係を起こす（待ち時間なしで始める）
         self.job_updated.connect(self._maybe_wake_nas)
         self._dest_sig = self._destination_signature()
@@ -108,3 +116,5 @@ class AppContext(QObject):
         self.ingest.stop()
         self.converter.stop()
         self.nas.stop()
+        self.batch.stop()
+        self.batch.wait(10)   # ffmpeg を止めて .part を片付けるまで少し待つ

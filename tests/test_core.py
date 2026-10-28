@@ -713,3 +713,191 @@ def test_cards_wait_until_start_is_confirmed(env):
     time.sleep(0.5)
     assert job3.state == I.S_DETECTED
     mgr.stop()
+
+
+# ---------------------------------------------------------------- 保存済みの一括変換
+def _batch_env_tree(env):
+    """NAS に、manifest の無い古い取り込み（旧Rコード風）と、台帳にある取り込みを作る。"""
+    import pytest
+    from camtrapdesk.core.ffmpeg import find_ffmpeg
+    if not find_ffmpeg():
+        pytest.skip("ffmpeg が無い")
+    nas = env["nas"]
+    old = nas / "N250101" / "BSN0001"
+    old.mkdir(parents=True)
+    assert make_avi(old / "IMG_0001.AVI") and make_avi(old / "IMG_0002.AVI")
+    (old / "IMG_0003.MP4").write_bytes(b"m" * 3000)          # mp4 は触らない
+    (old / "IMG_0009.mp4.part").write_bytes(b"p" * 10)        # 前回の途中（消す）
+    (old / "@eaDir").mkdir()                                   # Synology のサムネイル（入らない）
+    assert make_avi(old / "@eaDir" / "X.AVI")
+    (nas / "#recycle").mkdir()
+    assert make_avi(nas / "#recycle" / "Y.AVI")
+    return old
+
+
+def test_batch_convert_scan_and_run(env):
+    """保存済みフォルダ以下の AVI を見つけて mp4 に変換し、元を消す。mp4・@eaDir・#recycle は触らない。"""
+    from camtrapdesk.core import batch_convert as B
+    s, ledger = env["settings"], env["ledger"]
+    s.convert_encoder = "libx264"
+    old = _batch_env_tree(env)
+    avi_sizes = {n: os.path.getsize(old / n) for n in ("IMG_0001.AVI", "IMG_0002.AVI")}
+    res = B.scan(str(env["nas"]), s, ledger)
+    assert not res.issues and res.n_parts_removed == 1 and not (old / "IMG_0009.mp4.part").exists()
+    assert [f.dir for f in res.folders] == [str(old)]
+    assert res.n_files == 2 and res.total_bytes == sum(avi_sizes.values())
+    fp = res.folders[0]
+    assert not fp.has_manifest and fp.ingest_id is None and fp.n_other_media == 1
+    assert [(t.name, t.out_name, t.action) for t in fp.targets] == [("IMG_0001.AVI", "IMG_0001.mp4", B.A_CONVERT),
+                                                                     ("IMG_0002.AVI", "IMG_0002.mp4", B.A_CONVERT)]
+    logs, status = [], []
+    done = []
+    bc = B.BatchConverter(lambda: s, ledger, on_status=status.append, on_log=logs.append, on_done=done.append)
+    assert bc.start(res, parallel=2)
+    bc.wait(120)
+    assert not bc.running and done and done[0].n_done == 2 and done[0].n_failed == 0, logs
+    assert sorted(os.listdir(old)) == ["@eaDir", "IMG_0001.mp4", "IMG_0002.mp4", "IMG_0003.MP4"]
+    assert (old / "@eaDir" / "X.AVI").is_file() and (env["nas"] / "#recycle" / "Y.AVI").is_file()
+    st = bc.snapshot()
+    assert st.bytes_in_done == sum(avi_sizes.values()) and st.bytes_out_done == sum(
+        os.path.getsize(old / n) for n in ("IMG_0001.mp4", "IMG_0002.mp4"))
+    # 更新日時は元を引き継ぐ
+    assert abs(os.path.getmtime(old / "IMG_0001.mp4") - fp.targets[0].mtime) < 2
+    # もう一度走査すると対象なし
+    res2 = B.scan(str(env["nas"]), s, ledger)
+    assert res2.n_files == 0 and res2.folders == []
+    assert any(e["kind"] == "batch_convert" for e in ledger.recent_events())
+
+
+def test_batch_convert_updates_manifest_and_ledger(env):
+    """台帳にある取り込み（NAS で検証済み）の NAS 側を変換すると、manifest と台帳が mp4 に合う。
+    中継側の控えを変換しても台帳は触らず、manifest だけ合わせる。"""
+    import pytest
+    from camtrapdesk.core import batch_convert as B
+    from camtrapdesk.core.ffmpeg import find_ffmpeg
+    if not find_ffmpeg():
+        pytest.skip("ffmpeg が無い")
+    s, ledger = env["settings"], env["ledger"]
+    s.convert_encoder = "libx264"
+    s.media_extensions = ["mp4", "avi"]
+    root, _ = make_card(env["cards"], "264", n_files=1)
+    media = os.path.join(root, "DCIM", "100_BTCF")
+    assert make_avi(os.path.join(media, "IMG_0001.AVI"))
+    run_ingest(env)
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    while ledger.pending_nas():
+        syncer._tick()
+    ing = ledger.latest_ingest_for_card("264")
+    assert ing.status == L.STATUS_SYNCED
+    nas_dir = env["nas"] / "N260710" / "264"
+    staging_dir = env["dest"] / "N260710" / "264"
+    old_hash = {f.name: f.hash for f in ledger.files_for(ing.id)}["IMG_0001.AVI"]
+
+    # NAS 側（正本）
+    res = B.scan(str(env["nas"]), s, ledger)
+    fp = res.folders[0]
+    assert fp.has_manifest and fp.ingest_id == ing.id and fp.ledger_authoritative and not fp.skipped_reason
+    assert fp.targets[0].old_hash == old_hash
+    bc = B.BatchConverter(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    bc.start(res, parallel=1)
+    bc.wait(120)
+    assert sorted(os.listdir(nas_dir)) == ["IMG_0000.MP4", "IMG_0001.mp4", "manifest.json"]
+    recs = {f.name: f for f in ledger.files_for(ing.id)}
+    r = recs["IMG_0001.mp4"]
+    assert r.converted and r.src_name == "IMG_0001.AVI" and r.src_hash == old_hash and r.nas_ok
+    assert r.size == os.path.getsize(nas_dir / "IMG_0001.mp4") and r.hash == hash_file(str(nas_dir / "IMG_0001.mp4"))
+    assert ledger.get_ingest(ing.id).convert_done_at
+    man = L.Ledger.read_manifest(str(nas_dir))
+    mf = {f["name"]: f for f in man["files"]}
+    assert mf["IMG_0001.mp4"]["src_name"] == "IMG_0001.AVI" and mf["IMG_0001.mp4"]["src_hash"] == old_hash
+    assert mf["IMG_0001.mp4"]["hash"] == r.hash and man["batch_converted_at"] and man["total_bytes"] == sum(f["size"] for f in man["files"])
+
+    # 中継側（控え）: manifest は合わせるが台帳は触らない
+    res2 = B.scan(str(env["dest"]), s, ledger)
+    fp2 = res2.folders[0]
+    assert fp2.ingest_id == ing.id and not fp2.ledger_authoritative
+    bc2 = B.BatchConverter(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    bc2.start(res2, parallel=1)
+    bc2.wait(120)
+    assert sorted(os.listdir(staging_dir)) == ["IMG_0000.MP4", "IMG_0001.mp4", "manifest.json"]
+    man2 = L.Ledger.read_manifest(str(staging_dir))
+    assert {f["name"] for f in man2["files"]} == {"IMG_0000.MP4", "IMG_0001.mp4"}
+    assert {f.name: f for f in ledger.files_for(ing.id)}["IMG_0001.mp4"].hash == r.hash   # 台帳は NAS 側のまま
+
+    # SD の削除判定は元の AVI の名前・サイズで通る
+    vols = list_volumes(scan_roots=[str(env["cards"])])
+    card = detect_cards(vols, "id.txt", ["DCIM/100_BTCF"], ["mp4", "avi"], False, 1024)[0]
+    v = check_card(card, ledger, s)
+    assert v.ok, v.reasons
+
+
+def test_batch_convert_skips_folders_in_flight_and_finishes_leftovers(env):
+    """NAS 転送がまだの取り込みは対象外。変換後に元を消す前に止まった状態（AVI と同じ更新日時の mp4）は元を消すだけ。"""
+    import pytest
+    import shutil
+    from camtrapdesk.core import batch_convert as B
+    from camtrapdesk.core.ffmpeg import find_ffmpeg
+    if not find_ffmpeg():
+        pytest.skip("ffmpeg が無い")
+    s, ledger = env["settings"], env["ledger"]
+    s.convert_encoder = "libx264"
+    s.media_extensions = ["mp4", "avi"]
+    root, _ = make_card(env["cards"], "264", n_files=1)
+    media = os.path.join(root, "DCIM", "100_BTCF")
+    assert make_avi(os.path.join(media, "IMG_0001.AVI"))
+    run_ingest(env)                      # staged、NAS はまだ
+    res = B.scan(str(env["dest"]), s, ledger)
+    assert len(res.folders) == 1 and "NAS への転送" in res.folders[0].skipped_reason and res.n_files == 0
+
+    # 途中で止まった形: 変換済み mp4（同じ更新日時）と元の AVI が両方ある
+    d = env["nas"] / "N250101" / "BSN0002"
+    d.mkdir(parents=True)
+    assert make_avi(d / "A.AVI")
+    mt = os.path.getmtime(d / "A.AVI")
+    tmp = env["tmp"] / "tmpconv"
+    tmp.mkdir()
+    assert make_avi(tmp / "tmp.AVI")
+    bc0 = B.BatchConverter(lambda: s, None, on_status=lambda m: None, on_log=lambda m: None)
+    bc0.start(B.scan(str(tmp), s, None), parallel=1)
+    bc0.wait(120)
+    shutil.move(str(tmp / "tmp.mp4"), str(d / "A.mp4"))
+    os.utime(d / "A.mp4", (mt, mt))
+    # 別のカメラの IMG.MP4 と同じ番号の AVI → _h264 名に逃がす
+    assert make_avi(d / "B.AVI")
+    (d / "B.mp4").write_bytes(b"other" * 100)
+    res2 = B.scan(str(d), s, None)
+    t = {x.name: x for x in res2.folders[0].targets}
+    assert t["A.AVI"].action == B.A_FINISH and t["A.AVI"].out_name == "A.mp4"
+    assert t["B.AVI"].action == B.A_CONVERT and t["B.AVI"].out_name == "B_h264.mp4"
+    logs = []
+    bc = B.BatchConverter(lambda: s, None, on_status=lambda m: None, on_log=logs.append)
+    bc.start(res2, parallel=1)
+    bc.wait(120)
+    assert sorted(os.listdir(d)) == ["A.mp4", "B.mp4", "B_h264.mp4"], logs
+    assert bc.snapshot().n_finished_only == 1 and bc.snapshot().n_done == 2
+
+
+def test_batch_convert_stop(env):
+    """中止すると ffmpeg を止め、途中の .part は残さず、元ファイルはそのまま。"""
+    import pytest
+    from camtrapdesk.core import batch_convert as B
+    from camtrapdesk.core.ffmpeg import find_ffmpeg
+    if not find_ffmpeg():
+        pytest.skip("ffmpeg が無い")
+    s = env["settings"]
+    s.convert_encoder = "libx264"
+    d = env["nas"] / "slow"
+    d.mkdir()
+    for i in range(4):
+        assert make_avi(d / f"S{i}.AVI", seconds=6)
+    res = B.scan(str(d), s, None)
+    bc = B.BatchConverter(lambda: s, None, on_status=lambda m: None, on_log=lambda m: None)
+    bc.start(res, parallel=1)
+    time.sleep(0.3)
+    bc.stop()
+    bc.wait(60)
+    st = bc.snapshot()
+    assert st.stopped and st.n_done < 4
+    names = os.listdir(d)
+    assert not any(n.endswith(".part") for n in names)
+    assert sum(1 for n in names if n.endswith(".AVI")) + st.n_done == 4

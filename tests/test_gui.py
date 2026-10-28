@@ -121,3 +121,57 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
     assert win.page(SlotPage).table.rowCount() == 2
     win.close()
     _pump(app, 0.2)
+
+
+def test_gui_batch_convert_page(tmp_path, monkeypatch):
+    """「動画を mp4 に変換」画面: フォルダを調べて一覧にし、確認ダイアログの Yes で変換し、終わると表が更新される。"""
+    from camtrapdesk.core.ffmpeg import find_ffmpeg
+    from test_core import make_avi
+    if not find_ffmpeg():
+        pytest.skip("ffmpeg が無い")
+    monkeypatch.setenv("CAMTRAPDESK_HOME", str(tmp_path / "home"))
+    nas = tmp_path / "nas"
+    d = nas / "N250101" / "BSN0007"
+    d.mkdir(parents=True)
+    assert make_avi(d / "IMG_0001.AVI") and make_avi(d / "IMG_0002.AVI")
+    (d / "IMG_0003.MP4").write_bytes(b"m" * 2000)
+    s = nakashima_settings(dest_root=str(tmp_path / "staging"), nas_root=str(nas), convert_encoder="libx264",
+                           scan_roots=[str(tmp_path / "cards")], poll_interval_sec=0.2)
+    (tmp_path / "staging").mkdir(); (tmp_path / "cards").mkdir()
+    save_settings(s)
+
+    app = QApplication.instance() or QApplication([])
+    from camtrapdesk.ui.context import AppContext
+    from camtrapdesk.ui.main_window import MainWindow
+    from camtrapdesk.ui.pages.batch_convert_page import BatchConvertPage
+    ctx = AppContext()
+    win = MainWindow(ctx)
+    win.show()
+    page = win.page(BatchConvertPage)
+    win.show_page(BatchConvertPage)
+    assert page.path_row.text() == str(nas)     # 既定は NAS の保存先
+    page.scan()
+    for _ in range(100):
+        _pump(app, 0.1)
+        if page.plan is not None:
+            break
+    assert page.plan is not None and page.plan.n_files == 2
+    assert page.table.rowCount() == 1 and page.table.item(0, 1).text() == "2"
+    assert page.start_btn.isEnabled()
+    win.grab().save(str(tmp_path / "batch_scan.png"))
+
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    page.start()
+    assert ctx.batch.running or ctx.batch.snapshot().finished_at
+    for _ in range(300):
+        _pump(app, 0.2)
+        if not ctx.batch.running:
+            break
+    _pump(app, 1.2)   # 完了シグナルと表の更新
+    assert not ctx.batch.running
+    assert sorted(os.listdir(d)) == ["IMG_0001.mp4", "IMG_0002.mp4", "IMG_0003.MP4"]
+    assert page.table.item(0, 3).text() == "2" and not page.start_btn.isEnabled()
+    assert "完了" in page.status_label.text()
+    win.grab().save(str(tmp_path / "batch_done.png"))
+    win.close()
+    _pump(app, 0.2)
