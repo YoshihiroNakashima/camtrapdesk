@@ -901,3 +901,34 @@ def test_batch_convert_stop(env):
     names = os.listdir(d)
     assert not any(n.endswith(".part") for n in names)
     assert sum(1 for n in names if n.endswith(".AVI")) + st.n_done == 4
+
+
+def test_batch_convert_to_separate_folder_keeps_originals(env):
+    """保存先を別フォルダにすると、相対パスを保って mp4 を書き、元の AVI は残り、manifest も台帳も触らない。"""
+    from camtrapdesk.core import batch_convert as B
+    s, ledger = env["settings"], env["ledger"]
+    s.convert_encoder = "libx264"
+    old = _batch_env_tree(env)
+    out = env["tmp"] / "converted"
+    # 保存先が同じ・中にある場合は断る
+    assert B.scan(str(env["nas"]), s, ledger, out_root=str(env["nas"])).issues
+    assert B.scan(str(env["nas"]), s, ledger, out_root=str(env["nas"] / "sub")).issues
+    res = B.scan(str(env["nas"]), s, ledger, out_root=str(out))
+    assert not res.issues and not res.in_place and res.n_files == 2
+    fp = res.folders[0]
+    assert fp.out_dir == str(out / os.path.relpath(str(old), str(env["nas"]))) and not fp.has_manifest and not fp.ledger_authoritative
+    assert (old / "IMG_0009.mp4.part").exists()          # 置き換えではないので元側の .part も触らない
+    logs, done = [], []
+    bc = B.BatchConverter(lambda: s, ledger, on_status=lambda m: None, on_log=logs.append, on_done=done.append)
+    assert bc.start(res, parallel=1)
+    bc.wait(120)
+    assert done and done[0].n_done == 2 and done[0].n_failed == 0, logs
+    assert "残して" in done[0].message
+    assert (old / "IMG_0001.AVI").is_file() and (old / "IMG_0002.AVI").is_file()      # 元はそのまま
+    out_dir = out / os.path.relpath(str(old), str(env["nas"]))
+    assert sorted(os.listdir(out_dir)) == ["IMG_0001.mp4", "IMG_0002.mp4"]
+    assert abs(os.path.getmtime(out_dir / "IMG_0001.mp4") - fp.targets[0].mtime) < 2
+    # もう一度走査すると、出力先に変換済みがあるので対象なし（元は消さない）
+    res2 = B.scan(str(env["nas"]), s, ledger, out_root=str(out))
+    assert res2.n_files == 0 and all(t.action == B.A_SKIP for f in res2.folders for t in f.targets)
+    assert (old / "IMG_0001.AVI").is_file()

@@ -42,12 +42,18 @@ class Target:
     action: str = A_CONVERT
     reason: str = ""
     old_hash: str | None = None     # manifest に書かれていた元ファイルのハッシュ
+    out_dir: str = ""               # 変換結果を置くフォルダ（空なら dir と同じ＝置き換え）
+
+    @property
+    def dest_dir(self) -> str:
+        return self.out_dir or self.dir
 
 
 @dataclass
 class FolderPlan:
     dir: str
     targets: list[Target] = field(default_factory=list)
+    out_dir: str = ""                    # 別のフォルダに保存するときの出力先（空なら同じ場所に置き換え）
     has_manifest: bool = False
     ingest_id: int | None = None
     ledger_authoritative: bool = False   # この場所がその取り込みの正本（台帳も更新する）
@@ -79,7 +85,12 @@ class FolderPlan:
 @dataclass
 class ScanResult:
     root: str
+    out_root: str = ""                   # 空なら同じ場所に置き換え（元を消す）。指定があれば元は残す
     folders: list[FolderPlan] = field(default_factory=list)
+
+    @property
+    def in_place(self) -> bool:
+        return not self.out_root
     n_dirs_seen: int = 0
     n_parts_removed: int = 0
     issues: list[str] = field(default_factory=list)
@@ -131,10 +142,20 @@ def _is_prior_output(src_path: str, src_mtime: float, out_path: str, ffmpeg: str
 
 
 def plan_folder(d: str, names: list[str], exts: set[str], media_exts: set[str],
-                manifest: dict | None, ffmpeg: str | None = None) -> FolderPlan:
-    """1 つのフォルダの中で、どのファイルをどの名前に変換するかを決める。"""
-    fp = FolderPlan(dir=d, has_manifest=manifest is not None)
-    lower = {n.lower(): n for n in names}
+                manifest: dict | None, ffmpeg: str | None = None, out_dir: str = "") -> FolderPlan:
+    """1 つのフォルダの中で、どのファイルをどの名前に変換するかを決める。
+    out_dir を指定すると、そのフォルダへ書く（元は残す）。名前の衝突は出力先の中身で判定する。"""
+    fp = FolderPlan(dir=d, has_manifest=manifest is not None and not out_dir, out_dir=out_dir)
+    if out_dir:
+        try:
+            out_names = os.listdir(out_dir) if os.path.isdir(out_dir) else []
+        except OSError:
+            out_names = []
+        lower = {n.lower(): n for n in out_names}
+        check_dir = out_dir
+    else:
+        lower = {n.lower(): n for n in names}
+        check_dir = d
     man_hash: dict[str, str | None] = {}
     if manifest:
         for f in manifest.get("files", []):
@@ -155,7 +176,7 @@ def plan_folder(d: str, names: list[str], exts: set[str], media_exts: set[str],
             fp.targets.append(Target(d, n, 0, 0.0, "", A_SKIP, f"読めません: {e}"))
             continue
         stem = n.rsplit(".", 1)[0] if "." in n else n
-        t = Target(d, n, st.st_size, st.st_mtime, stem + ".mp4", old_hash=man_hash.get(n))
+        t = Target(d, n, st.st_size, st.st_mtime, stem + ".mp4", old_hash=man_hash.get(n), out_dir=out_dir)
         if st.st_size == 0:
             t.action, t.reason = A_SKIP, "サイズが 0 のファイル"
         else:
@@ -164,9 +185,12 @@ def plan_folder(d: str, names: list[str], exts: set[str], media_exts: set[str],
                 if existing is None:
                     t.out_name = cand
                     break
-                if _is_prior_output(p, st.st_mtime, os.path.join(d, existing), ffmpeg):
-                    t.out_name, t.action = existing, A_FINISH
-                    t.reason = "変換済みの mp4 が既にあるので、元ファイルを消すだけ"
+                if _is_prior_output(p, st.st_mtime, os.path.join(check_dir, existing), ffmpeg):
+                    t.out_name = existing
+                    if out_dir:
+                        t.action, t.reason = A_SKIP, "出力先に変換済みの mp4 が既にあります"
+                    else:
+                        t.action, t.reason = A_FINISH, "変換済みの mp4 が既にあるので、元ファイルを消すだけ"
                     break
             else:
                 t.action, t.reason = A_SKIP, f"{stem}.mp4 も {stem}_h264.mp4 も既にあります（別のファイル）"
@@ -176,12 +200,23 @@ def plan_folder(d: str, names: list[str], exts: set[str], media_exts: set[str],
 
 def scan(root: str, settings: Settings, ledger: L.Ledger | None = None,
          stop: threading.Event | None = None, on_progress: Callable[[int, int], None] | None = None,
-         remove_parts: bool = True) -> ScanResult:
-    """root 以下を再帰的に調べて、変換の計画を作る。on_progress(見たフォルダ数, 見つけた対象ファイル数)。"""
-    res = ScanResult(root=root)
+         remove_parts: bool = True, out_root: str = "") -> ScanResult:
+    """root 以下を再帰的に調べて、変換の計画を作る。on_progress(見たフォルダ数, 見つけた対象ファイル数)。
+    out_root を指定すると、root からの相対パスを保って out_root の下に mp4 を書き、元ファイルは残す
+    （manifest や台帳は触らない。どこにあるフォルダでもよい）。"""
+    out_root = (out_root or "").strip()
+    res = ScanResult(root=root, out_root=out_root)
     if not root or not os.path.isdir(root):
         res.issues.append(f"フォルダが見つかりません: {root}")
         return res
+    if out_root:
+        if _same_path(root, out_root):
+            res.issues.append("保存先が変換するフォルダと同じです。同じ場所に置き換えるなら保存先を空にしてください")
+            return res
+        a, b = os.path.normcase(os.path.abspath(root)), os.path.normcase(os.path.abspath(out_root))
+        if b.startswith(a.rstrip("\\/") + os.sep):
+            res.issues.append("保存先が変換するフォルダの中にあります。別の場所を指定してください")
+            return res
     exts = {e.lower().lstrip(".") for e in settings.convert_extensions} or {"avi"}
     media_exts = {e.lower().lstrip(".") for e in settings.media_extensions}
     ffmpeg = find_ffmpeg(settings.ffmpeg_path)
@@ -198,10 +233,14 @@ def scan(root: str, settings: Settings, ledger: L.Ledger | None = None,
                 on_progress(res.n_dirs_seen, n_found)
             continue
         manifest = L.Ledger.read_manifest(d) if L.MANIFEST_NAME in names else None
-        fp = plan_folder(d, names, exts, media_exts, manifest, ffmpeg)
+        out_dir = ""
+        if out_root:
+            rel = os.path.relpath(d, root)
+            out_dir = out_root if rel == "." else os.path.join(out_root, rel)
+        fp = plan_folder(d, names, exts, media_exts, manifest, ffmpeg, out_dir=out_dir)
         if manifest and ledger is not None:
-            _attach_ledger(fp, manifest, ledger, settings)
-        if remove_parts and not fp.skipped_reason:
+            _attach_ledger(fp, manifest, ledger, settings, read_only=bool(out_root))
+        if remove_parts and not fp.skipped_reason and not out_root:
             # 前回の途中のファイル。取り込み時の変換が動いているフォルダ（対象外）のものは触らない
             for n in files:
                 if n.endswith(".mp4" + PART_SUFFIX):
@@ -217,8 +256,9 @@ def scan(root: str, settings: Settings, ledger: L.Ledger | None = None,
     return res
 
 
-def _attach_ledger(fp: FolderPlan, manifest: dict, ledger: L.Ledger, settings: Settings) -> None:
-    """manifest から台帳の記録を探し、この場所が正本かどうかと、取り込み途中かどうかを決める。"""
+def _attach_ledger(fp: FolderPlan, manifest: dict, ledger: L.Ledger, settings: Settings, read_only: bool = False) -> None:
+    """manifest から台帳の記録を探し、この場所が正本かどうかと、取り込み途中かどうかを決める。
+    read_only（別フォルダへ保存）のときは台帳を更新しない（正本扱いしない）。"""
     season = str(manifest.get("season_folder") or "")
     dir_name = str(manifest.get("dir_name") or os.path.basename(fp.dir))
     ing = ledger.find_by_dir(season, dir_name)
@@ -229,7 +269,7 @@ def _attach_ledger(fp: FolderPlan, manifest: dict, ledger: L.Ledger, settings: S
     if not is_nas and not is_staging:
         return   # 同名の別フォルダ（別の保存先に置いたコピーなど）
     fp.ingest_id = ing.id
-    fp.ledger_authoritative = is_nas or (is_staging and not ing.nas_root)
+    fp.ledger_authoritative = (is_nas or (is_staging and not ing.nas_root)) and not read_only
     if ing.cleared_at is None:
         if ing.status == L.STATUS_COPYING:
             fp.skipped_reason = "カードからのコピー中"
@@ -348,8 +388,10 @@ class BatchConverter:
             st.finished_at = time.time()
             st.stopped = self._stop.is_set()
             st.current.clear()
+            in_place = self.plan is None or self.plan.in_place
+            tail = f"（{fmt_bytes(st.saved_bytes)} 空き）" if in_place else "（元ファイルは残しています）"
             summary = (f"{'中止' if st.stopped else '完了'}: {st.n_done}/{st.n_total} ファイル、"
-                       f"{fmt_bytes(st.bytes_in_done)} → {fmt_bytes(st.bytes_out_done)}（{fmt_bytes(st.saved_bytes)} 空き）")
+                       f"{fmt_bytes(st.bytes_in_done)} → {fmt_bytes(st.bytes_out_done)}{tail}")
             if st.n_failed:
                 summary += f"、失敗 {st.n_failed}（元のまま残しました）"
             st.message = summary
@@ -439,13 +481,23 @@ class BatchConverter:
         cur = "、".join(sorted(st.current.values()))
         eta = st.eta_sec
         eta_s = f"、残り約 {eta/60:.0f} 分" if eta is not None and eta > 0 else ""
+        in_place = self.plan is None or self.plan.in_place
+        saved = f"{fmt_bytes(st.saved_bytes)} 空き" if in_place else f"出力 {fmt_bytes(st.bytes_out_done)}"
         self.on_status(f"{st.n_done}/{st.n_total} ファイル（{fmt_bytes(st.bytes_in_done)}/{fmt_bytes(st.bytes_total)}、"
-                       f"{fmt_bytes(st.saved_bytes)} 空き{eta_s}）" + (f"　変換中: {cur}" if cur else ""))
+                       f"{saved}{eta_s}）" + (f"　変換中: {cur}" if cur else ""))
 
     def _convert_one(self, fp: FolderPlan, t: Target, ffmpeg: str) -> tuple[int, str | None] | None:
         """1 ファイルを変換して元を消す。(変換後サイズ, ハッシュ) を返す。失敗は None（元はそのまま）。"""
         src = os.path.join(fp.dir, t.name)
-        dst = os.path.join(fp.dir, t.out_name)
+        keep_source = bool(t.out_dir)
+        dest_dir = t.dest_dir
+        if keep_source:
+            try:
+                os.makedirs(dest_dir, exist_ok=True)
+            except OSError as e:
+                self.on_log(f"{dest_dir}: 保存先のフォルダを作れません: {e}")
+                return None
+        dst = os.path.join(dest_dir, t.out_name)
         part = dst + PART_SUFFIX
         label = os.path.join(os.path.basename(fp.dir), t.name)
         if not os.path.isfile(src):
@@ -466,14 +518,14 @@ class BatchConverter:
                 return os.path.getsize(dst), (hash_file(dst) if fp.has_manifest else None)
             stem = t.name.rsplit(".", 1)[0] if "." in t.name else t.name
             alt = stem + "_h264.mp4"
-            if t.out_name.lower() == alt.lower() or os.path.exists(os.path.join(fp.dir, alt)):
+            if t.out_name.lower() == alt.lower() or os.path.exists(os.path.join(dest_dir, alt)):
                 self.on_log(f"{label}: 既存の {t.out_name} は変換結果ではないようで、別名も使えないので残します")
                 return None
             self.on_log(f"{label}: 既存の {t.out_name} は変換結果ではないようなので {alt} に変換します")
             t.out_name = alt
-            dst = os.path.join(fp.dir, alt)
+            dst = os.path.join(dest_dir, alt)
             part = dst + PART_SUFFIX
-        if not self._wait_for_space(fp.dir, t.size + 256 * 1024 * 1024):
+        if not self._wait_for_space(dest_dir, t.size + 256 * 1024 * 1024):
             return None
         t0 = time.time()
         ok, msg = convert_to_mp4(ffmpeg, src, part, self.encoder or "libx264", self._crf, stop=self._stop)
@@ -497,12 +549,14 @@ class BatchConverter:
             return None
         size = os.path.getsize(dst)
         h = hash_file(dst) if fp.has_manifest else None
-        try:
-            os.remove(src)
-        except OSError as e:
-            self.on_log(f"{label}: 変換後に元ファイルを消せません: {e}（次回の走査で消します）")
+        if not keep_source:
+            try:
+                os.remove(src)
+            except OSError as e:
+                self.on_log(f"{label}: 変換後に元ファイルを消せません: {e}（次回の走査で消します）")
         dt = time.time() - t0
-        self.on_log(f"{label} → {t.out_name}（{t.size/1e6:.0f} MB → {size/1e6:.0f} MB、{dt:.0f}秒、{self.encoder}）")
+        where = f" → {os.path.relpath(dst, t.out_dir)}（保存先）" if keep_source else f" → {t.out_name}"
+        self.on_log(f"{label}{where}（{t.size/1e6:.0f} MB → {size/1e6:.0f} MB、{dt:.0f}秒、{self.encoder}）")
         return size, h
 
     def _finalize_folder(self, fp: FolderPlan, results: list[tuple[Target, int, str | None]]) -> None:
@@ -523,7 +577,7 @@ class BatchConverter:
                 n += 1
             if n:
                 self.ledger.update_ingest(fp.ingest_id, convert_done_at=L.now_iso())
-        summary = f"{fp.dir}: {fp.n_done} ファイル変換（{fmt_bytes(fp.bytes_in)} → {fmt_bytes(fp.bytes_out)}）"
+        summary = f"{fp.dir}: {fp.n_done} ファイル変換（{fmt_bytes(fp.bytes_in)} → {fmt_bytes(fp.bytes_out)}）" + (f" → {fp.out_dir}" if fp.out_dir else "")
         if fp.n_failed:
             summary += f"、失敗 {fp.n_failed}"
         self.on_log(summary)

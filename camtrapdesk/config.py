@@ -60,6 +60,8 @@ class Settings:
     convert_encoder: str = "auto"    # auto / libx264 / h264_nvenc / h264_qsv / h264_amf / h264_videotoolbox
     convert_parallel: int = 2        # 同時に変換する本数
     ffmpeg_path: str = ""            # 空なら自動（アプリ同梱 → imageio-ffmpeg → PATH）
+    batch_convert_in_place: bool = True   # 「動画を mp4 に変換」: 同じ場所に置き換える（False なら別フォルダへ保存して元を残す）
+    batch_convert_out_root: str = ""      # 別フォルダへ保存するときの保存先
     # --- 野帳 ---
     fieldnote_path: str = field(default_factory=_default_fieldnote_path)
     fieldnote_sheet: str = ""      # 空なら最初のシート

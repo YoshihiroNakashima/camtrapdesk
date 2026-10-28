@@ -8,7 +8,7 @@ import time
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
-                               QProgressBar, QPushButton, QSpinBox, QSplitter, QVBoxLayout, QWidget)
+                               QProgressBar, QPushButton, QRadioButton, QSpinBox, QSplitter, QVBoxLayout, QWidget)
 
 from ...core import batch_convert as B
 from ..context import AppContext
@@ -28,10 +28,10 @@ class BatchConvertPage(QWidget):
         s = ctx.settings
 
         root = QVBoxLayout(self)
-        info = QLabel("すでに NAS や中継に保存してあるフォルダを指定して、その中の AVI などを H.264 の mp4 に変換し、元ファイルを消します"
-                      "（取り込み時の変換を使っていなかった頃のデータや、旧 R コードで取り込んだデータの容量を減らすため）。"
-                      "指定したフォルダ以下をすべて調べるので、保存先ごと、区切りフォルダ、地点フォルダのどれを指定してもかまいません。"
-                      "mp4 はそのまま、取り込み・NAS 転送が途中のフォルダは対象外。変換は不可逆で、元の AVI は残りません。")
+        info = QLabel("フォルダを指定して、その中（サブフォルダも含む）の AVI などを H.264 の mp4 に変換します。NAS や中継の保存先に限らず、"
+                      "PC のどのフォルダでも使えます。保存先は「同じ場所に置き換える（元の AVI を消して容量を減らす）」か、"
+                      "「別のフォルダに保存する（フォルダ構造を保って mp4 を書き、元はそのまま残す）」を選べます。"
+                      "mp4 はそのまま、取り込み・NAS 転送が途中のフォルダは対象外です。")
         info.setWordWrap(True)
         root.addWidget(info)
 
@@ -50,6 +50,21 @@ class BatchConvertPage(QWidget):
         h1.addWidget(self.nas_btn)
         h1.addWidget(self.dest_btn)
         form.addRow("変換するフォルダ", h1)
+
+        out_box = QVBoxLayout()
+        self.inplace_radio = QRadioButton("同じ場所に置き換える（変換した mp4 を同じフォルダに置き、元の AVI を消す。不可逆）")
+        self.out_radio = QRadioButton("別のフォルダに保存する（元の AVI はそのまま残す）")
+        self.inplace_radio.setChecked(s.batch_convert_in_place)
+        self.out_radio.setChecked(not s.batch_convert_in_place)
+        self.out_row = PathRow(s.batch_convert_out_root, "dir", placeholder=r"例: D:\converted（変換するフォルダからの相対パスを保って mp4 を書きます）")
+        self.out_row.setEnabled(not s.batch_convert_in_place)
+        self.out_radio.toggled.connect(self.out_row.setEnabled)
+        out_box.addWidget(self.inplace_radio)
+        h_out = QHBoxLayout()
+        h_out.addWidget(self.out_radio)
+        h_out.addWidget(self.out_row, 1)
+        out_box.addLayout(h_out)
+        form.addRow("保存先", out_box)
 
         h2 = QHBoxLayout()
         self.ext_edit = QLineEdit(", ".join(s.convert_extensions))
@@ -161,6 +176,15 @@ class BatchConvertPage(QWidget):
         if not find_ffmpeg(s.ffmpeg_path):
             QMessageBox.warning(self, "ffmpeg", "ffmpeg が見つかりません。「設定」の動画の変換で場所を指定してください。")
             return
+        out_root = "" if self.inplace_radio.isChecked() else self.out_row.text()
+        if not self.inplace_radio.isChecked() and not out_root:
+            QMessageBox.warning(self, "保存先", "別のフォルダに保存する場合は、保存先のフォルダを指定してください。")
+            return
+        st = self.ctx.settings
+        if st.batch_convert_in_place != self.inplace_radio.isChecked() or st.batch_convert_out_root != self.out_row.text():
+            st.batch_convert_in_place = self.inplace_radio.isChecked()
+            st.batch_convert_out_root = self.out_row.text()
+            self.ctx.save()
         self.plan = None
         self.start_btn.setEnabled(False)
         self.scan_btn.setEnabled(False)
@@ -169,12 +193,13 @@ class BatchConvertPage(QWidget):
         self.bar.setValue(0)
         self.bar.setFormat("")
         self.status_label.setText(f"{root} を調べています…")
-        self._append_log(f"走査を開始: {root}（拡張子: {', '.join(s.convert_extensions)}）")
+        self._append_log(f"走査を開始: {root}（拡張子: {', '.join(s.convert_extensions)}）" + (f" → 保存先 {out_root}" if out_root else "（同じ場所に置き換え）"))
         self._scan_stop.clear()
 
         def work() -> None:
             try:
-                res = B.scan(root, s, self.ctx.ledger, stop=self._scan_stop, on_progress=self._scan_progress.emit)
+                res = B.scan(root, s, self.ctx.ledger, stop=self._scan_stop, on_progress=self._scan_progress.emit,
+                             out_root=out_root)
             except Exception as e:  # pragma: no cover
                 res = B.ScanResult(root=root, issues=[f"走査でエラー: {e}"])
             self._scan_done.emit(res)
@@ -211,6 +236,8 @@ class BatchConvertPage(QWidget):
             notes = []
             if fp.skipped_reason:
                 notes.append("対象外: " + fp.skipped_reason)
+            if fp.out_dir:
+                notes.append("→ " + fp.out_dir)
             if fp.has_manifest:
                 notes.append("manifest あり" + ("・台帳も更新" if fp.ledger_authoritative else ""))
             n_finish = sum(1 for t in fp.targets if t.action == B.A_FINISH)
@@ -239,11 +266,15 @@ class BatchConvertPage(QWidget):
         if self.ctx.converter.busy():
             QMessageBox.information(self, "変換中", "取り込み時の変換が動いています。終わってから始めてください。")
             return
+        if plan.in_place:
+            how = "変換した mp4 を同じフォルダに置き、元のファイルは消します。この操作は元に戻せません。"
+        else:
+            how = f"変換した mp4 を {plan.out_root} の下に（フォルダ構造を保って）書きます。元のファイルはそのまま残します。"
         lines = [f"フォルダ: {plan.root}",
                  f"対象: {plan.n_files} ファイル（{human_size(plan.total_bytes)}）",
                  f"画質 CRF {int(self.crf.value())}、同時 {int(self.parallel.value())} 本",
                  "",
-                 "変換した mp4 を同じフォルダに置き、元のファイルは消します。この操作は元に戻せません。",
+                 how,
                  "MJPEG の AVI なら容量は 10 分の 1 程度になり、見た目はほぼ変わりません。",
                  "", "始めますか？"]
         if QMessageBox.question(self, "変換の実行", "\n".join(lines)) != QMessageBox.StandardButton.Yes:
@@ -296,6 +327,7 @@ class BatchConvertPage(QWidget):
         self.bar.setFormat(f"{st.n_done}/{st.n_total} ファイル {st.frac*100:.0f}%")
         if b.running and self.plan is b.plan:
             self._show_plan(self.plan)
-        saved = f"空いた容量 {human_size(st.saved_bytes)}" if st.bytes_in_done else ""
+        in_place = not (b.plan and b.plan.out_root)
+        saved = (f"空いた容量 {human_size(st.saved_bytes)}" if in_place else f"出力 {human_size(st.bytes_out_done)}") if st.bytes_in_done else ""
         el = f"経過 {st.elapsed/60:.0f} 分" if st.elapsed >= 60 else ""
         self.summary_label.setText("　".join(x for x in (saved, el) if x))
