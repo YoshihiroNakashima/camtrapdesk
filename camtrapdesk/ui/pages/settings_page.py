@@ -125,6 +125,9 @@ class SettingsPage(QWidget):
                                    file_filter="ffmpeg (ffmpeg.exe ffmpeg);;すべて (*)")
         self.ffmpeg_check = QPushButton("ffmpeg とエンコーダを確認")
         self.ffmpeg_check.clicked.connect(self._check_ffmpeg)
+        self.ffmpeg_dl = QPushButton("ffmpeg をダウンロードして入れる")
+        self.ffmpeg_dl.setToolTip("公式ビルド（Windows は約 200 MB、GitHub から）を取ってきて、アプリの tools フォルダに置きます。Mac は evermeet.cx の静的ビルド")
+        self.ffmpeg_dl.clicked.connect(self._download_ffmpeg)
         self.ffmpeg_result = QLabel("")
         self.ffmpeg_result.setWordWrap(True)
         f5.addRow("", self.conv_enabled)
@@ -141,6 +144,7 @@ class SettingsPage(QWidget):
         f5.addRow("ffmpeg の場所", self.ffmpeg_path)
         hf = QHBoxLayout()
         hf.addWidget(self.ffmpeg_check)
+        hf.addWidget(self.ffmpeg_dl)
         hf.addWidget(self.ffmpeg_result, 1)
         f5.addRow("", hf)
         lay.addWidget(g5)
@@ -193,18 +197,66 @@ class SettingsPage(QWidget):
         lay.addStretch(1)
 
     def _check_ffmpeg(self) -> None:
-        from ...core.ffmpeg import detect_encoder, ffmpeg_candidates, find_ffmpeg
+        from ...core.ffmpeg import candidate_status, detect_encoder, ffmpeg_candidates, find_ffmpeg, forget_ffmpeg
         from PySide6.QtWidgets import QApplication
+        forget_ffmpeg()
         path = find_ffmpeg(self.ffmpeg_path.text())
         if not path:
-            tried = "\n".join("  " + c for c in ffmpeg_candidates(self.ffmpeg_path.text()))
-            self.ffmpeg_result.setText("ffmpeg が見つかりません。ffmpeg.exe をアプリの tools フォルダに置くか、上の欄で場所を指定してください。\n探した場所:\n" + tried)
+            tried = "\n".join("  " + candidate_status(c) for c in ffmpeg_candidates(self.ffmpeg_path.text()))
+            self.ffmpeg_result.setText("使える ffmpeg が見つかりません。「ffmpeg をダウンロードして入れる」を押すか、上の欄で場所を指定してください。\n探した場所:\n" + tried)
             return
         self.ffmpeg_result.setText(f"{path} を確認中…")
         QApplication.processEvents()
         enc = detect_encoder(path, self.conv_encoder.currentData() or "auto")
         kind = "CPU" if enc == "libx264" else "ハードウェア"
         self.ffmpeg_result.setText(f"ffmpeg: {path}\n使うエンコーダ: {enc}（{kind}）")
+
+    def _download_ffmpeg(self) -> None:
+        import threading
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QProgressDialog
+        from ...core.ffmpeg import app_tools_dir, download_ffmpeg
+        dest = app_tools_dir()
+        dlg = QProgressDialog(f"ffmpeg を取ってきています…\n置き場所: {dest}", "中止", 0, 1000, self)
+        dlg.setWindowTitle("ffmpeg のダウンロード")
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        state = {"got": 0, "total": 0, "done": None}
+        stop = threading.Event()
+
+        def prog(got: int, total: int) -> None:
+            state["got"], state["total"] = got, total
+
+        def work() -> None:
+            state["done"] = download_ffmpeg(dest, on_progress=prog, stop=stop)
+
+        threading.Thread(target=work, name="ffmpeg-dl", daemon=True).start()
+        timer = QTimer(self)
+
+        def tick() -> None:
+            if dlg.wasCanceled():
+                stop.set()
+            got, total = state["got"], state["total"]
+            if total:
+                dlg.setValue(int(got * 1000 / total))
+                dlg.setLabelText(f"ffmpeg を取ってきています… {got/1e6:.0f} / {total/1e6:.0f} MB\n置き場所: {dest}")
+            else:
+                dlg.setLabelText(f"ffmpeg を取ってきています… {got/1e6:.0f} MB\n置き場所: {dest}")
+            if state["done"] is not None:
+                timer.stop()
+                dlg.close()
+                ok, msg = state["done"]
+                if ok:
+                    self.ffmpeg_path.setText("")
+                    self._check_ffmpeg()
+                    QMessageBox.information(self, "ffmpeg", f"ffmpeg を入れました:\n{msg}")
+                else:
+                    self.ffmpeg_result.setText(msg)
+                    QMessageBox.warning(self, "ffmpeg", msg)
+
+        timer.timeout.connect(tick)
+        timer.start(200)
 
     def _update_example(self) -> None:
         pre = self.station_prefix.text().strip()

@@ -55,21 +55,148 @@ def ffmpeg_candidates(configured: str = "") -> list[str]:
     return cands
 
 
+_works_cache: dict[str, bool] = {}
+
+
+def ffmpeg_works(path: str) -> bool:
+    """その ffmpeg が実際に起動するか（途中で切れたダウンロードなど、壊れたファイルを除くため）。"""
+    with _lock:
+        if path in _works_cache:
+            return _works_cache[path]
+    ok = False
+    try:
+        if os.path.isfile(path):
+            r = _run([path, "-version"], timeout=30)
+            ok = r.returncode == 0 and "ffmpeg" in (r.stdout or "").lower()
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        ok = False
+    with _lock:
+        _works_cache[path] = ok
+    return ok
+
+
+def forget_ffmpeg() -> None:
+    """ffmpeg を置き直した後に、探索結果を忘れて探し直させる。"""
+    with _lock:
+        _ffmpeg_cache.clear()
+        _works_cache.clear()
+        _encoder_cache.clear()
+
+
 def find_ffmpeg(configured: str = "") -> str | None:
-    """ffmpeg の実行ファイルを探す（見つからなければ None）。結果はプロセス内で覚える。"""
+    """ffmpeg の実行ファイルを探す（見つからなければ None）。壊れたファイルは飛ばす。結果はプロセス内で覚える。"""
     key = configured or ""
     with _lock:
         if key in _ffmpeg_cache:
             return _ffmpeg_cache[key]
     result = None
     for c in ffmpeg_candidates(configured):
-        if c and not c.startswith("(") and os.path.isfile(c) and os.access(c, os.X_OK):
+        if c and not c.startswith("(") and os.path.isfile(c) and ffmpeg_works(c):
             result = c
             break
     with _lock:
         if result is not None:
             _ffmpeg_cache[key] = result   # 見つからなかった場合は覚えない（後から置けば次の確認で見つかる）
     return result
+
+
+def candidate_status(path: str) -> str:
+    """確認画面用: 候補の状態を短く説明する。"""
+    if not path or path.startswith("("):
+        return path
+    if not os.path.isfile(path):
+        return f"{path}  … 無し"
+    size = os.path.getsize(path)
+    if ffmpeg_works(path):
+        return f"{path}  … 使えます（{size/1e6:.0f} MB）"
+    return f"{path}  … 壊れています（{size/1e6:.1f} MB。ダウンロードが途中で切れた可能性。置き直してください）"
+
+
+# ----------------------------------------------------------------------------
+# ダウンロード
+# ----------------------------------------------------------------------------
+
+FFMPEG_WIN_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+FFMPEG_MAC_URL = "https://evermeet.cx/ffmpeg/getrelease/zip"
+
+
+def app_tools_dir() -> str:
+    """ffmpeg を置く場所: アプリのフォルダの tools（配布版は exe と同じ場所の tools）。"""
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base, "tools")
+
+
+def download_ffmpeg(dest_dir: str | None = None, on_progress=None, stop: "threading.Event | None" = None) -> tuple[bool, str]:
+    """公式ビルドの ffmpeg を取ってきて dest_dir に置く。Windows は BtbN の GPL ビルド（libx264・nvenc・qsv・amf 入り）、
+    Mac は evermeet.cx の静的ビルド。on_progress(受け取ったバイト数, 全体のバイト数または 0)。"""
+    import tempfile
+    import urllib.request
+    import zipfile
+
+    dest_dir = dest_dir or app_tools_dir()
+    if sys.platform == "win32":
+        url, members = FFMPEG_WIN_URL, {"ffmpeg.exe": "/bin/ffmpeg.exe", "ffprobe.exe": "/bin/ffprobe.exe"}
+    elif sys.platform == "darwin":
+        url, members = FFMPEG_MAC_URL, {"ffmpeg": "ffmpeg"}
+    else:
+        return False, "Linux では配布元のパッケージ（apt install ffmpeg など）を使ってください"
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError as e:
+        return False, f"置き場所を作れません: {dest_dir} ({e})"
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", dir=dest_dir)
+    tmp_path = tmp.name
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "camtrapdesk"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            total = int(resp.headers.get("Content-Length") or 0)
+            got = 0
+            while True:
+                if stop is not None and stop.is_set():
+                    return False, "中止しました"
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                tmp.write(chunk)
+                got += len(chunk)
+                if on_progress:
+                    on_progress(got, total)
+        tmp.close()
+        if total and got != total:
+            return False, f"ダウンロードが途中で切れました（{got/1e6:.0f} / {total/1e6:.0f} MB）。もう一度試してください"
+        with zipfile.ZipFile(tmp_path) as z:
+            names = z.namelist()
+            for out_name, suffix in members.items():
+                hit = next((n for n in names if n.endswith(suffix)), None)
+                if hit is None:
+                    if out_name.startswith("ffprobe"):
+                        continue
+                    return False, f"取ってきたファイルに {out_name} がありません"
+                out_path = os.path.join(dest_dir, out_name)
+                with z.open(hit) as src, open(out_path + ".tmp", "wb") as dst:
+                    shutil.copyfileobj(src, dst, 1024 * 1024)
+                os.replace(out_path + ".tmp", out_path)
+                if sys.platform != "win32":
+                    os.chmod(out_path, 0o755)
+    except Exception as e:
+        return False, f"ダウンロードに失敗しました: {e}"
+    finally:
+        try:
+            tmp.close()
+        except Exception:
+            pass
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+    forget_ffmpeg()
+    exe = os.path.join(dest_dir, "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
+    if not ffmpeg_works(exe):
+        return False, f"置いた ffmpeg が起動しません: {exe}"
+    return True, exe
 
 
 def ffprobe_path(ffmpeg: str) -> str | None:

@@ -932,3 +932,19 @@ def test_batch_convert_to_separate_folder_keeps_originals(env):
     res2 = B.scan(str(env["nas"]), s, ledger, out_root=str(out))
     assert res2.n_files == 0 and all(t.action == B.A_SKIP for f in res2.folders for t in f.targets)
     assert (old / "IMG_0001.AVI").is_file()
+
+
+def test_broken_ffmpeg_binary_is_skipped(tmp_path, monkeypatch):
+    """途中で切れたダウンロードなど、起動しない ffmpeg は候補から外す（WinError 193 で全体が止まらないように）。"""
+    from camtrapdesk.core import ffmpeg as F
+    F.forget_ffmpeg()
+    bad = tmp_path / "ffmpeg"
+    bad.write_bytes(b"\x00" * 2_000_000)
+    bad.chmod(0o755)
+    assert not F.ffmpeg_works(str(bad))
+    assert "壊れています" in F.candidate_status(str(bad))
+    real = F.find_ffmpeg()
+    F.forget_ffmpeg()
+    found = F.find_ffmpeg(str(bad))        # 設定で壊れたものを指しても、次の候補（本物）へ進む
+    assert found != str(bad) and found == real
+    F.forget_ffmpeg()
