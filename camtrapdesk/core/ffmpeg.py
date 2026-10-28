@@ -81,6 +81,7 @@ def forget_ffmpeg() -> None:
         _ffmpeg_cache.clear()
         _works_cache.clear()
         _encoder_cache.clear()
+        _encoder_report.clear()
 
 
 def find_ffmpeg(configured: str = "") -> str | None:
@@ -271,39 +272,72 @@ def _quality_args(encoder: str, crf: int) -> list[str]:
     return ["-crf", str(crf)]
 
 
-def _try_encoder(ffmpeg: str, encoder: str) -> bool:
-    """小さなテスト映像を実際にエンコードして、このPCで使えるか確かめる。"""
-    args = [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=0.3:size=128x72:rate=10",
-            "-c:v", encoder, *_quality_args(encoder, 23), "-pix_fmt", "yuv420p", "-f", "null",
-            "NUL" if sys.platform == "win32" else "/dev/null"]
+_encoder_report: dict[str, list[tuple[str, bool, str]]] = {}
+
+
+def _try_encoder(ffmpeg: str, encoder: str) -> tuple[bool, str]:
+    """テスト映像を実際にエンコードして、このPCで使えるか確かめる。(使える, 理由) を返す。
+    小さすぎる映像だとハードウェアエンコーダが「解像度が小さい」で失敗するので、普通の大きさで試す。"""
+    args = [ffmpeg, "-v", "error", "-y", "-nostdin", "-f", "lavfi", "-i", "testsrc=duration=0.5:size=640x360:rate=10",
+            "-c:v", encoder, *_quality_args(encoder, 23), "-pix_fmt", "yuv420p", "-f", "null", "-"]
     try:
-        r = _run(args, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return r.returncode == 0
+        r = _run(args, timeout=90)
+    except subprocess.TimeoutExpired:
+        return False, "テストが時間内に終わりません"
+    except OSError as e:
+        return False, f"起動できません: {e}"
+    if r.returncode == 0:
+        return True, "使えます"
+    err = [ln.strip() for ln in (r.stderr or "").strip().splitlines() if ln.strip()]
+    # 最初の行に本当の理由（ドライバが無い、解像度、など）が出る。エンコーダ名の付いた行を優先する
+    for ln in err:
+        if f"[{encoder}" in ln:
+            return False, ln.split("] ", 1)[-1]
+    return False, (err[0] if err else f"終了コード {r.returncode}")
+
+
+def _available_encoders(ffmpeg: str) -> set[str]:
+    r = _run([ffmpeg, "-hide_banner", "-encoders"], timeout=60)
+    available = set()
+    for line in (r.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].startswith("V"):
+            available.add(parts[1])
+    return available
 
 
 def detect_encoder(ffmpeg: str, preferred: str = "auto") -> str:
-    """使えるエンコーダを選ぶ。preferred が auto 以外ならそれを試し、だめなら libx264。"""
+    """使えるエンコーダを選ぶ。preferred が auto 以外ならそれを試し、だめなら libx264。試した結果は encoder_report で見られる。"""
     key = f"{ffmpeg}|{preferred}"
     with _lock:
         if key in _encoder_cache:
             return _encoder_cache[key]
-    r = _run([ffmpeg, "-hide_banner", "-encoders"], timeout=60)
-    available = set()
-    for line in r.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0].startswith("V"):
-            available.add(parts[1])
+    available = _available_encoders(ffmpeg)
     cands = HW_ENCODERS if preferred == "auto" else [preferred]
     chosen = CPU_ENCODER
+    report: list[tuple[str, bool, str]] = []
     for enc in cands:
-        if enc in available and _try_encoder(ffmpeg, enc):
+        if enc not in available:
+            report.append((enc, False, "この ffmpeg には入っていません"))
+            continue
+        ok, why = _try_encoder(ffmpeg, enc)
+        report.append((enc, ok, why))
+        if ok:
             chosen = enc
             break
+    if chosen == CPU_ENCODER:
+        report.append((CPU_ENCODER, CPU_ENCODER in available, "CPU で変換します" if CPU_ENCODER in available else "libx264 も入っていません"))
     with _lock:
         _encoder_cache[key] = chosen
+        _encoder_report[key] = report
     return chosen
+
+
+def encoder_report(ffmpeg: str, preferred: str = "auto") -> list[tuple[str, bool, str]]:
+    """detect_encoder が試した各エンコーダの結果 [(名前, 使えるか, 理由)]。"""
+    detect_encoder(ffmpeg, preferred)
+    with _lock:
+        return list(_encoder_report.get(f"{ffmpeg}|{preferred}", []))
 
 
 def _run_cancellable(args: list[str], timeout: float, stop: "threading.Event | None") -> tuple[int, str]:

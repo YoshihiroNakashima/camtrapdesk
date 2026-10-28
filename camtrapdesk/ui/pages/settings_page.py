@@ -205,11 +205,18 @@ class SettingsPage(QWidget):
             tried = "\n".join("  " + candidate_status(c) for c in ffmpeg_candidates(self.ffmpeg_path.text()))
             self.ffmpeg_result.setText("使える ffmpeg が見つかりません。「ffmpeg をダウンロードして入れる」を押すか、上の欄で場所を指定してください。\n探した場所:\n" + tried)
             return
-        self.ffmpeg_result.setText(f"{path} を確認中…")
+        self.ffmpeg_result.setText(f"{path} を確認中…（各エンコーダで短い試し変換をします）")
         QApplication.processEvents()
-        enc = detect_encoder(path, self.conv_encoder.currentData() or "auto")
+        from ...core.ffmpeg import encoder_report
+        pref = self.conv_encoder.currentData() or "auto"
+        enc = detect_encoder(path, pref)
         kind = "CPU" if enc == "libx264" else "ハードウェア"
-        self.ffmpeg_result.setText(f"ffmpeg: {path}\n使うエンコーダ: {enc}（{kind}）")
+        lines = [f"ffmpeg: {path}", f"使うエンコーダ: {enc}（{kind}）", "試した結果:"]
+        for name, ok, why in encoder_report(path, pref):
+            lines.append(f"  {name}: {'○ ' if ok else '× '}{why}")
+        if enc == "libx264" and pref == "auto":
+            lines.append("GPU があるのに × のときは、グラフィックドライバを最新にするか、理由の行を知らせてください")
+        self.ffmpeg_result.setText("\n".join(lines))
 
     def _download_ffmpeg(self) -> None:
         import threading
