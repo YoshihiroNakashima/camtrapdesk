@@ -368,15 +368,31 @@ def _run_cancellable(args: list[str], timeout: float, stop: "threading.Event | N
     return code, err
 
 
-def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
-                   threads: int = 0, stop: "threading.Event | None" = None) -> tuple[bool, str]:
-    """src を H.264/AAC の mp4 として dst に書く。dst は .part などの一時名で呼び、呼び出し側で改名する。
-    終わったら長さを照合して (成功, メッセージ) を返す。stop（threading.Event）が立つと ffmpeg を止めて失敗を返す。"""
-    info = probe(ffmpeg, src)
-    if info is None:
-        return False, "元の動画を読み取れません（壊れている可能性）"
-    args = [ffmpeg, "-v", "error", "-y", "-nostdin", "-i", src, "-map", "0:v:0", "-c:v", encoder,
-            *_quality_args(encoder, crf), "-pix_fmt", "yuv420p"]
+# GPU でのデコード（MJPEG → GPU 上で直接エンコード）。使えなければ CPU デコードに戻す。(エンコーダ, 元コーデック) → 使えるか
+_gpu_decode_ok: dict[tuple[str, str], bool] = {}
+
+# 元コーデックごとの GPU デコードの入力オプション（-i の前に置く）
+_GPU_DECODE = {
+    "h264_nvenc": {"mjpeg": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-c:v", "mjpeg_cuvid"],
+                   "h264": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda", "-c:v", "h264_cuvid"]},
+    "h264_qsv": {"mjpeg": ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-c:v", "mjpeg_qsv"],
+                 "h264": ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv", "-c:v", "h264_qsv"]},
+}
+
+
+def gpu_decode_available(encoder: str, vcodec: str) -> bool | None:
+    """この組み合わせで GPU デコードが使えたか（None はまだ試していない）。"""
+    return _gpu_decode_ok.get((encoder, vcodec))
+
+
+def _build_args(ffmpeg: str, src: str, dst: str, encoder: str, crf: int, info: "MediaInfo", threads: int,
+                gpu_decode: bool) -> list[str]:
+    args = [ffmpeg, "-v", "error", "-y", "-nostdin"]
+    if gpu_decode:
+        args += _GPU_DECODE[encoder][info.vcodec]
+    args += ["-i", src, "-map", "0:v:0", "-c:v", encoder, *_quality_args(encoder, crf)]
+    if not gpu_decode:
+        args += ["-pix_fmt", "yuv420p"]   # GPU 上のフレームはそのままエンコーダへ渡す（変換は GPU 側）
     if info.has_audio:
         args += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "96k"]
     else:
@@ -384,14 +400,48 @@ def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
     if threads and encoder == "libx264":
         args += ["-threads", str(threads)]
     args += ["-map_metadata", "0", "-movflags", "+faststart", "-f", "mp4", dst]
-    try:
-        code, stderr = _run_cancellable(args, max(600.0, info.duration * 20 + 120), stop)
-    except OSError as e:
-        return False, f"ffmpeg を実行できません: {e}"
-    if code == -1:
-        return False, "中止しました"
-    if code == -2:
-        return False, "変換が時間内に終わりませんでした"
+    return args
+
+
+def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
+                   threads: int = 0, stop: "threading.Event | None" = None) -> tuple[bool, str]:
+    """src を H.264/AAC の mp4 として dst に書く。dst は .part などの一時名で呼び、呼び出し側で改名する。
+    終わったら長さを照合して (成功, メッセージ) を返す。stop（threading.Event）が立つと ffmpeg を止めて失敗を返す。
+
+    ハードウェアエンコーダ（nvenc / qsv）のときは、デコードも GPU で行う経路をまず試す。
+    MJPEG のデコードと色変換は CPU では重く、エンコードだけ GPU にしても速くならないため。
+    GPU デコードが使えない（非対応の JPEG 形式など）ときは、その組み合わせを覚えて以後は CPU デコードにする。"""
+    info = probe(ffmpeg, src)
+    if info is None:
+        return False, "元の動画を読み取れません（壊れている可能性）"
+    can_gpu = encoder in _GPU_DECODE and info.vcodec in _GPU_DECODE[encoder]
+    use_gpu = can_gpu and _gpu_decode_ok.get((encoder, info.vcodec), True)
+    timeout = max(600.0, info.duration * 20 + 120)
+    attempts = [use_gpu, False] if use_gpu else [False]
+    code, stderr = 1, ""
+    used_gpu = False
+    for gpu in attempts:
+        args = _build_args(ffmpeg, src, dst, encoder, crf, info, threads, gpu)
+        try:
+            code, stderr = _run_cancellable(args, timeout, stop)
+        except OSError as e:
+            return False, f"ffmpeg を実行できません: {e}"
+        if code == -1:
+            return False, "中止しました"
+        if code == -2:
+            return False, "変換が時間内に終わりませんでした"
+        if code == 0:
+            used_gpu = gpu
+            if gpu:
+                _gpu_decode_ok[(encoder, info.vcodec)] = True
+            break
+        if gpu:
+            # GPU デコードが使えない組み合わせ。以後は CPU デコード＋GPU エンコードにする
+            _gpu_decode_ok[(encoder, info.vcodec)] = False
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
     if code != 0:
         err = stderr.strip().splitlines()
         return False, "ffmpeg エラー: " + (err[-1] if err else f"code {code}")
@@ -402,4 +452,4 @@ def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
         return False, "変換後のファイルを読み取れません"
     if info.duration > 0 and abs(out.duration - info.duration) > max(1.0, info.duration * 0.02):
         return False, f"変換後の長さが合いません（元 {info.duration:.1f}s / 変換後 {out.duration:.1f}s）"
-    return True, f"{encoder}"
+    return True, f"{encoder}" + ("（デコードも GPU）" if used_gpu else "")

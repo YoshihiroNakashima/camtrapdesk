@@ -556,7 +556,7 @@ class BatchConverter:
                 self.on_log(f"{label}: 変換後に元ファイルを消せません: {e}（次回の走査で消します）")
         dt = time.time() - t0
         where = f" → {os.path.relpath(dst, t.out_dir)}（保存先）" if keep_source else f" → {t.out_name}"
-        self.on_log(f"{label}{where}（{t.size/1e6:.0f} MB → {size/1e6:.0f} MB、{dt:.0f}秒、{self.encoder}）")
+        self.on_log(f"{label}{where}（{t.size/1e6:.0f} MB → {size/1e6:.0f} MB、{dt:.0f}秒、{msg}）")
         return size, h
 
     def _finalize_folder(self, fp: FolderPlan, results: list[tuple[Target, int, str | None]]) -> None:

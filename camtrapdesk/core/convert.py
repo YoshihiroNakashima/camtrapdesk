@@ -199,5 +199,5 @@ class Converter:
         except OSError as e:
             self.on_log(f"[{ing.card_id}] 変換後に元ファイルを消せません: {src} ({e})")
         dt = time.time() - t0
-        self.on_log(f"[{ing.card_id}] {f.name} → {new_name}（{f.size/1e6:.0f} MB → {size/1e6:.0f} MB、{dt:.0f}秒）")
+        self.on_log(f"[{ing.card_id}] {f.name} → {new_name}（{f.size/1e6:.0f} MB → {size/1e6:.0f} MB、{dt:.0f}秒、{msg}）")
         return True
