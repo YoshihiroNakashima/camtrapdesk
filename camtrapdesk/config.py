@@ -63,15 +63,13 @@ class Settings:
     # --- 野帳 ---
     fieldnote_path: str = field(default_factory=_default_fieldnote_path)
     fieldnote_sheet: str = ""      # 空なら最初のシート
-    col_season: str = "Season"
-    col_station: str = "Station"
-    col_type: str = "Type"
-    col_retrieval_sd: str = "RetrievalSD"
+    col_station: str = "Station"           # 地点名の列
+    col_retrieval_sd: str = "RetrievalSD"  # 回収したカードの ID の列
     card_id_match_tail_number: bool = True   # id.txt の "6_650" と野帳の 650 を同一視する
     # 地点名（フォルダ名）の付け方: 接頭辞＋番号をゼロ埋め。例: BSN + 4桁 → 482 → BSN0482。接頭辞が空なら数字だけ（0482）
     station_prefix: str = "BSN"
     station_digits: int = 4                  # 0 ならゼロ埋めしない
-    last_type: str = ""                      # 「地点名に変更」で前回選んだ Type（次回も同じものを選ぶ）
+    rename_filters: list[list[str]] = field(default_factory=list)   # 「地点名に変更」で前回使った絞り込み [[列, 値], ...]
     # --- ボリューム検出 ---
     scan_roots: list[str] = field(default_factory=list)   # 追加の検索ルート（テスト・Linux用）
     exclude_volumes: list[str] = field(default_factory=list)

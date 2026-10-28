@@ -34,13 +34,29 @@ def _norm_header(h: str) -> str:
 @dataclass
 class FieldnoteRow:
     row_no: int               # Excel の行番号（1始まり、見出しを含む）
-    season: str
     station: str
-    type_code: str
     retrieval_sd: str
+    values: dict[str, str] = field(default_factory=dict)   # 見出し → セルの文字列（全列。絞り込み用）
     date: str = ""
     state: str = ""
     remarks: str = ""
+
+    def get(self, column: str) -> str:
+        return self.values.get(column, "")
+
+
+Condition = tuple[str, str]   # (列名, 値)。値が空なら「その列が空の行」
+
+
+def _same_value(a: str, b: str) -> bool:
+    """セルの値の比較。空白と大文字小文字の違い、数値の表記（260710 と 260710.0）は無視する。"""
+    x, y = (a or "").strip(), (b or "").strip()
+    if x.lower() == y.lower():
+        return True
+    try:
+        return float(x) == float(y)
+    except ValueError:
+        return False
 
 
 @dataclass
@@ -51,28 +67,45 @@ class Fieldnote:
     header: list[str]
     rows: list[FieldnoteRow]
     notes: list[str] = field(default_factory=list)   # 列名の読み替えなど、読み込み時の注意
-    has_type: bool = True       # Type 列がある（無ければ全行を1つの Type "" として扱う）
-    has_season: bool = True     # Season 列がある（無ければ全行を1つの Season "" として扱う）
 
-    def types(self) -> list[str]:
-        """Type の一覧（多い順）。Type 列が無ければ [""]。"""
-        if not self.has_type:
-            return [""]
+    @property
+    def columns(self) -> list[str]:
+        """絞り込みに使える列名（見出しが空の列は除く）。"""
+        return [h for h in self.header if h]
+
+    def resolve_column(self, name: str) -> str | None:
+        """ユーザーが書いた列名を、このファイルの見出しに対応づける（大文字小文字・空白・記号の違いは無視）。"""
+        n = _norm_header(name)
+        for h in self.columns:
+            if _norm_header(h) == n:
+                return h
+        close = difflib.get_close_matches(n, [_norm_header(h) for h in self.columns], n=1, cutoff=0.8)
+        if close:
+            for h in self.columns:
+                if _norm_header(h) == close[0]:
+                    return h
+        return None
+
+    def distinct(self, column: str) -> list[str]:
+        """その列にある値の一覧（多い順、同数なら新しそうな順＝降順）。"""
+        col = self.resolve_column(column) or column
         seen: dict[str, int] = {}
         for r in self.rows:
-            seen[r.type_code] = seen.get(r.type_code, 0) + 1
-        return sorted(seen, key=lambda k: (-seen[k], k))
+            v = r.get(col)
+            seen[v] = seen.get(v, 0) + 1
+        return sorted(seen, key=lambda k: (-seen[k], k), reverse=False)
 
-    def seasons(self, type_code: str | None = None) -> list[str]:
-        """Season の一覧（新しい順）。Season 列が無ければ [""]。"""
-        if not self.has_season:
-            return [""]
-        vals = {r.season for r in self.rows if type_code is None or not self.has_type or r.type_code == type_code}
-        return sorted(vals, reverse=True)
-
-    def select(self, type_code: str, season: str) -> list[FieldnoteRow]:
-        return [r for r in self.rows
-                if (not self.has_type or r.type_code == type_code) and (not self.has_season or r.season == season)]
+    def filter(self, conditions: list[Condition]) -> list[FieldnoteRow]:
+        """すべての条件（列 = 値）に合う行。条件が無ければ全行。列名の揺れは読み替える。"""
+        resolved: list[Condition] = []
+        for col, val in conditions:
+            if not (col or "").strip():
+                continue
+            h = self.resolve_column(col)
+            if h is None:
+                return []
+            resolved.append((h, val))
+        return [r for r in self.rows if all(_same_value(r.get(h), v) for h, v in resolved)]
 
 
 def list_sheets(path: str) -> list[str]:
@@ -119,23 +152,13 @@ def load_fieldnote(path: str, s: Settings, sheet: str | None = None) -> Fieldnot
             header = [_s(h) for h in next(it)]
         except StopIteration:
             raise ValueError("シートが空です")
-        # 必須は Station と 回収SD。Season と Type は無くてもよい（無ければ全行が対象）
+        # 必須は Station と 回収SD だけ。ほかの列（Season, Type など）は絞り込みに自由に使える
         wanted = {"station": s.col_station, "retrieval": s.col_retrieval_sd}
         idx, notes, missing = _resolve_columns(header, wanted)
         if missing:
             cols = ", ".join(h for h in header if h)
             raise ValueError("野帳に列がありません: " + ", ".join(missing)
                              + f"\n\nこのファイルの列: {cols}\n\n設定画面の「野帳の列名」をこのファイルに合わせてください。")
-        optional = {k: v for k, v in (("season", s.col_season), ("type", s.col_type)) if v.strip()}
-        oidx, onotes, omissing = _resolve_columns(header, optional)
-        idx.update(oidx)
-        notes += onotes
-        has_season = "season" in idx
-        has_type = "type" in idx
-        if not has_season:
-            notes.append("Season 列が無いので、野帳の全行を対象にします")
-        if not has_type:
-            notes.append("Type 列が無いので、Type の区別なしに扱います")
         extra, _n, _m = _resolve_columns(header, {"date": "Date", "state": "State", "remarks": "Remarks"})
 
         def get(row: tuple, key: str, table: dict[str, int]) -> str:
@@ -146,18 +169,18 @@ def load_fieldnote(path: str, s: Settings, sheet: str | None = None) -> Fieldnot
         for n, row in enumerate(it, start=2):
             if row is None or all(v is None for v in row):
                 continue
+            values = {h: _s(row[i]) if i < len(row) else "" for i, h in enumerate(header) if h}
             rows.append(FieldnoteRow(
                 row_no=n,
-                season=get(row, "season", idx),
                 station=get(row, "station", idx),
-                type_code=get(row, "type", idx),
                 retrieval_sd=get(row, "retrieval", idx),
+                values=values,
                 date=get(row, "date", extra),
                 state=get(row, "state", extra),
                 remarks=get(row, "remarks", extra),
             ))
         return Fieldnote(path=path, sheet=sheet_name, sheets=list(wb.sheetnames), header=header, rows=rows,
-                         notes=notes, has_type=has_type, has_season=has_season)
+                         notes=notes)
     finally:
         wb.close()
 
@@ -209,11 +232,14 @@ class MapEntry:
 
 @dataclass
 class Mapping:
-    type_code: str
-    season: str
-    season_folder: str
+    conditions: list[Condition]
+    season_folder: str      # 変更するフォルダ（保存先の下。空なら保存先の直下）
     entries: list[MapEntry]
     issues: list[str]       # 対応表全体に関する問題点
+
+    @property
+    def condition_text(self) -> str:
+        return "、".join(f"{c} = {v if v else '（空）'}" for c, v in self.conditions if c.strip()) or "（絞り込みなし: 全行）"
 
     def by_card(self) -> dict[str, list[MapEntry]]:
         d: dict[str, list[MapEntry]] = {}
@@ -222,22 +248,24 @@ class Mapping:
         return d
 
 
-def build_mapping(fn: Fieldnote, type_code: str, season: str, s: Settings, season_folder: str | None = None) -> Mapping:
-    """選んだ Type と Season の行から、回収SDのカードID→地点フォルダ名の対応表を作る。
+def build_mapping(fn: Fieldnote, conditions: list[Condition], s: Settings, season_folder: str | None = None) -> Mapping:
+    """絞り込み条件（列 = 値 の AND）に合う行から、回収SDのカードID→地点フォルダ名の対応表を作る。
 
-    season_folder は変更するフォルダ（保存先の下のシーズンフォルダ名。空なら保存先の直下）。
-    省略すると設定の現在のシーズンフォルダ。野帳の Season は行の選択にだけ使う。
-    重複（同じカードIDが複数行、整形後の地点名が複数行）は該当行にエラーを付け、
-    それ以外の行は変更可能なままにする。
+    season_folder は変更するフォルダ（保存先の下のフォルダ名。空なら保存先の直下）。省略すると設定の現在のフォルダ。
+    重複（同じカードIDが複数行、整形後の地点名が複数行）は該当行にエラーを付け、それ以外の行は変更可能なままにする。
     """
-    rows = fn.select(type_code, season)
+    conditions = [(c, v) for c, v in conditions if (c or "").strip()]
     season_folder = (s.season_folder if season_folder is None else season_folder).strip()
     entries: list[MapEntry] = []
     issues: list[str] = list(fn.notes)
+    for col, _v in conditions:
+        if fn.resolve_column(col) is None:
+            issues.append(f"列 '{col}' がこの野帳にありません（列: {', '.join(fn.columns)}）")
+            return Mapping(conditions, season_folder, [], issues)
+    rows = fn.filter(conditions)
     if not rows:
-        what = ", ".join(x for x in [f"Type={type_code}" if fn.has_type else "", f"Season={season}" if fn.has_season else ""] if x)
-        issues.append(f"{what or '野帳'} の行がありません")
-        return Mapping(type_code, season, season_folder, [], issues)
+        issues.append("条件に合う行がありません: " + Mapping(conditions, season_folder, [], []).condition_text)
+        return Mapping(conditions, season_folder, [], issues)
 
     for r in rows:
         sd = r.retrieval_sd
@@ -269,4 +297,4 @@ def build_mapping(fn: Fieldnote, type_code: str, season: str, s: Settings, seaso
             for x in es:
                 x.errors.append(f"地点 {st} が{len(es)}行にあります")
             issues.append(f"地点 {st} が複数行にあります（行 {', '.join(str(x.row_no) for x in es)}）")
-    return Mapping(type_code, season, season_folder, entries, issues)
+    return Mapping(conditions, season_folder, entries, issues)

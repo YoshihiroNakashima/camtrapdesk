@@ -149,19 +149,17 @@ class SettingsPage(QWidget):
         g4 = QGroupBox("野帳の列名と地点名の付け方")
         f4 = QFormLayout(g4)
         f4.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.col_season = QLineEdit(s.col_season)
         self.col_station = QLineEdit(s.col_station)
-        self.col_type = QLineEdit(s.col_type)
         self.col_ret = QLineEdit(s.col_retrieval_sd)
         self.tail_match = QCheckBox("カードIDは末尾の数字で照合する（id.txt の 6_650 と野帳の 650 を同じとみなす）")
         self.tail_match.setChecked(s.card_id_match_tail_number)
         cols = QHBoxLayout()
-        for lbl, w in (("Season", self.col_season), ("Station", self.col_station), ("Type", self.col_type),
-                       ("回収SD", self.col_ret)):
+        for lbl, w in (("地点名の列", self.col_station), ("回収したカードIDの列", self.col_ret)):
             cols.addWidget(QLabel(lbl))
             cols.addWidget(w)
+        cols.addStretch(1)
         f4.addRow("野帳の列名", cols)
-        note = QLabel("Station と 回収SD は必須。Season と Type は野帳に無くてもよい（無ければ全行が対象）。大文字小文字や綴りの揺れは自動で読み替えます。")
+        note = QLabel("この2列だけ必須。どの行を使うか（Season や Type など）は「2. 地点名に変更」画面で列と値を指定して絞り込みます。大文字小文字や綴りの揺れは自動で読み替えます。")
         note.setWordWrap(True)
         f4.addRow("", note)
         f4.addRow("", self.tail_match)
@@ -236,9 +234,7 @@ class SettingsPage(QWidget):
         s.poll_interval_sec = float(self.poll.value())
         s.scan_roots = self._split(self.scan_roots.text())
         s.exclude_volumes = self._split(self.exclude.text())
-        s.col_season = self.col_season.text().strip() or "Season"
         s.col_station = self.col_station.text().strip() or "Station"
-        s.col_type = self.col_type.text().strip() or "Type"
         s.col_retrieval_sd = self.col_ret.text().strip() or "RetrievalSD"
         s.card_id_match_tail_number = self.tail_match.isChecked()
         s.station_prefix = self.station_prefix.text().strip()

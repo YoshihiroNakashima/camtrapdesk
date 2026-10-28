@@ -171,9 +171,13 @@ def test_fieldnote_mapping_and_rename(env):
         {"season": 260710, "station": 999, "inst": 1, "ret": 777, "type": "W"},
     ])
     fn = load_fieldnote(str(fn_path), s)
-    assert fn.types()[0] == "N"
-    assert fn.seasons("N") == ["260710", "260424"]
-    m = build_mapping(fn, "N", "260710", s)
+    assert fn.distinct("Type")[0] == "N"
+    assert sorted(fn.distinct("Season")) == ["260424", "260710"]
+    assert len(fn.filter([("Type", "N"), ("Season", "260710")])) == 4
+    assert len(fn.filter([("season", "260710.0")])) == 5      # 列名の大文字小文字、数値表記の違いは無視
+    assert fn.filter([("NoSuchColumn", "x")]) == []
+    m = build_mapping(fn, [("Type", "N"), ("Season", "260710")], s)
+    assert m.condition_text == "Type = N、Season = 260710"
     by = {e.station_folder: e for e in m.entries}
     assert by["BSN0592"].card_id == "318" and not by["BSN0592"].errors
     assert by["BSN0482"].errors and by["BSN0980"].errors        # 重複は両方保留
@@ -221,8 +225,8 @@ def test_real_fieldnote_if_present():
         return
     s = nakashima_settings()
     fn = load_fieldnote(path, s)
-    assert "N" in fn.types()
-    m = build_mapping(fn, "N", "260710", s, season_folder="N260710")
+    assert "N" in fn.distinct("Type")
+    m = build_mapping(fn, [("Type", "N"), ("Season", "260710")], s, season_folder="N260710")
     assert m.season_folder == "N260710"
     assert len(m.entries) == 148
     dup = [e for e in m.entries if e.errors]
@@ -241,8 +245,8 @@ def test_fieldnote_tolerant_headers(tmp_path):
     s = nakashima_settings()
     fn = load_fieldnote(str(p), s)
     assert any("Statuion" in n for n in fn.notes)
-    assert fn.seasons("N") == ["N261016"]
-    m = build_mapping(fn, "N", "N261016", s, season_folder="N261016")
+    assert fn.distinct("Season") == ["N261016"]
+    m = build_mapping(fn, [("Type", "N"), ("Season", "N261016")], s, season_folder="N261016")
     assert m.season_folder == "N261016"          # 変更するフォルダは野帳の Season とは別に指定する
     assert [e.station_folder for e in m.entries] == ["BSN0690"]
     assert m.entries[0].card_id == "263"
@@ -266,7 +270,7 @@ def test_rename_matches_prefixed_card_id(env):
     fn_path = env["tmp"] / "fn.xlsx"
     make_fieldnote(fn_path, [{"season": "N260710", "station": 1266, "ret": 650}])
     fn = load_fieldnote(str(fn_path), s)
-    m = build_mapping(fn, "N", "N260710", s)
+    m = build_mapping(fn, [("Type", "N"), ("Season", "N260710")], s)
     plan = build_plan(str(env["dest"]), str(env["nas"]), m, ledger)
     it = {i.card_id: i for i in plan.items}["650"]
     assert it.action == A_RENAME and it.src_dir_name == "6_650" and it.dst_dir_name == "BSN1266"
@@ -326,7 +330,7 @@ def test_rename_works_when_only_nas_copy_remains(env):
     assert not (env["dest"] / "N260710" / "318").exists()
     fn_path = env["tmp"] / "fn.xlsx"
     make_fieldnote(fn_path, [{"season": 260710, "station": 592, "ret": 318}])
-    m = build_mapping(load_fieldnote(str(fn_path), s), "N", "260710", s)
+    m = build_mapping(load_fieldnote(str(fn_path), s), [("Season", "260710")], s)
     plan = build_plan(str(env["dest"]), str(env["nas"]), m, ledger)
     it = {i.card_id: i for i in plan.items}["318"]
     assert it.action == A_RENAME and (it.in_staging, it.in_nas) == (False, True)
@@ -516,10 +520,11 @@ def test_generic_fieldnote_without_season_and_type(env):
     ws.append(["Creek 7", 99, ""])
     p = env["tmp"] / "simple.xlsx"; wb.save(p)
     fn = load_fieldnote(str(p), s)
-    assert not fn.has_season and not fn.has_type
-    assert fn.types() == [""] and fn.seasons("") == [""]
-    assert any("Season 列が無い" in n for n in fn.notes)
-    m = build_mapping(fn, "", "", s)
+    assert fn.columns == ["Station", "RetrievalSD", "Remarks"]
+    m = build_mapping(fn, [], s)                                   # 条件なし → 全行
+    assert m.condition_text.startswith("（絞り込みなし")
+    bad = build_mapping(fn, [("Season", "1")], s)
+    assert not bad.entries and any("ありません" in i for i in bad.issues)
     assert m.season_folder == "" and [e.station_folder for e in m.entries] == ["Ridge-03", "Creek 7"]
     plan = build_plan(str(env["dest"]), str(env["nas"]), m, ledger)
     acts = {i.card_id: i.action for i in plan.items}
@@ -537,7 +542,7 @@ def test_generic_fieldnote_without_season_and_type(env):
 
 def test_default_settings_are_not_user_specific():
     s = Settings()
-    assert s.fieldnote_path == "" and s.volume_label_prefix == "" and s.last_type == ""
+    assert s.fieldnote_path == "" and s.volume_label_prefix == "" and s.rename_filters == []
     assert (s.station_prefix, s.station_digits) == ("BSN", 4)   # 既定は BSN + 4桁。接頭辞を空にすると数字だけ
     assert format_station(" 0482 ", "", 4) == "0482"
     # 旧形式の設定（Type ごとの規則）からの読み替え

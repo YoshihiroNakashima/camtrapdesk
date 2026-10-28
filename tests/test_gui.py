@@ -88,9 +88,13 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
     rename_page = win.page(RenamePage)
     win.show_page(RenamePage)
     rename_page.load_fieldnote()
-    assert rename_page.type_combo.currentText() == "N"
-    assert rename_page.season_combo.currentText() == "260710"
+    # 初期条件: 変更するフォルダ N260710 に合う Season = 260710 が自動で入る
+    assert rename_page.conditions() == [("Season", "260710")]
+    rename_page.add_condition("Type", "N")
+    assert rename_page.conditions() == [("Season", "260710"), ("Type", "N")]
+    assert "条件に合う行: 2 / 2" in rename_page.match_label.text()
     rename_page.dry_run()
+    assert ctx.settings.rename_filters == [["Season", "260710"], ["Type", "N"]]
     assert rename_page.plan and rename_page.plan.count("rename") == 2
     rename_page.apply()
     # 中継と NAS の両方が地点名になる（中継のコピーは既定で残す）
