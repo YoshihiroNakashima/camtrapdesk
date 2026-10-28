@@ -115,6 +115,8 @@ class IngestManager:
         self.paused = False
         self._skipped_reported: set[str] = set()   # id.txt が無い等で対象外にしたボリューム（1回だけ記録）
         self.others: dict[str, tuple[Volume, str]] = {}   # カードとして扱えないリムーバブルボリュームと理由
+        self.suggested_ids: dict[str, str] = {}           # id.txt の無いボリューム → 前回の ID（ボリュームシリアルから）
+        self._remembered: set[tuple[str, str]] = set()    # 今回の起動で台帳に書いた (シリアル, ID)
 
     # ------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -193,8 +195,14 @@ class IngestManager:
                              s.media_recursive, s.min_file_size_bytes, list_files=True,
                              min_file_count=s.min_file_count)
         present = {c.volume.key for c in cards}
+        # ID のあるカードは、ボリュームシリアルと ID の対応を覚えておく（id.txt が消えたときの候補に使う）
+        for c in cards:
+            if c.volume.serial and (c.volume.serial, c.card_id) not in self._remembered:
+                self.ledger.remember_card_volume(c.volume.serial, c.card_id, c.volume.label)
+                self._remembered.add((c.volume.serial, c.card_id))
         # カードとして扱えなかったリムーバブルボリュームは、理由付きで一覧に出し、ログにも1回だけ書く
         others: dict[str, tuple[Volume, str]] = {}
+        suggested: dict[str, str] = {}
         for v in vols:
             if v.key in present:
                 continue
@@ -202,6 +210,10 @@ class IngestManager:
                 reason = f"Windows が読み取れません（{v.error}）。別のスロットに挿し直すか、カードの破損・未フォーマットを疑ってください"
             elif v.kind in ("removable", "virtual"):
                 _cid, reason = read_card_id_with_reason(v, s.id_file_name)
+                known = self.ledger.card_id_for_serial(v.serial) if v.serial else None
+                if known:
+                    suggested[v.key] = known[0]
+                    reason += f"。前回このカードは ID {known[0]} でした（{known[1][:10]}）。「カードにIDを付ける」に候補が入ります"
             else:
                 continue
             others[v.key] = (v, reason)
@@ -210,6 +222,7 @@ class IngestManager:
                 self.on_log(f"ボリューム {v.display}（{v.label or 'ラベル無し'}）は対象外: {reason}")
         with self._lock:
             self.others = others
+            self.suggested_ids = suggested
         self._skipped_reported &= {v.key for v in vols}
         new_jobs: list[CardJob] = []
         with self._lock:

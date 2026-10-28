@@ -68,6 +68,12 @@ CREATE TABLE IF NOT EXISTS files (
     converted INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_files_ingest ON files(ingest_id);
+CREATE TABLE IF NOT EXISTS card_volumes (
+    serial TEXT PRIMARY KEY,
+    card_id TEXT NOT NULL,
+    label TEXT,
+    last_seen TEXT
+);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
@@ -190,6 +196,25 @@ class Ledger:
     def recent_events(self, limit: int = 200) -> list[sqlite3.Row]:
         with self._conn() as c:
             return list(c.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)))
+
+    # ------------------------------------------------------ card volumes
+    def remember_card_volume(self, serial: str, card_id: str, label: str = "") -> None:
+        """ボリュームシリアル（フォーマットしない限り変わらない）とカードIDの対応を覚えておく。
+        id.txt が消えたカードに、前回の ID を候補として出すため。"""
+        if not serial or not card_id:
+            return
+        with self._lock, self._conn() as c:
+            c.execute("INSERT INTO card_volumes(serial, card_id, label, last_seen) VALUES (?,?,?,?)"
+                      " ON CONFLICT(serial) DO UPDATE SET card_id = excluded.card_id, label = excluded.label,"
+                      " last_seen = excluded.last_seen", (serial, card_id.strip(), label or "", now_iso()))
+
+    def card_id_for_serial(self, serial: str) -> tuple[str, str] | None:
+        """(card_id, last_seen) を返す。知らなければ None。"""
+        if not serial:
+            return None
+        with self._conn() as c:
+            r = c.execute("SELECT card_id, last_seen FROM card_volumes WHERE serial = ?", (serial,)).fetchone()
+            return (r["card_id"], r["last_seen"] or "") if r else None
 
     # ----------------------------------------------------------- ingests
     @staticmethod

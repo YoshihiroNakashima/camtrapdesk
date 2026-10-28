@@ -23,6 +23,7 @@ class Volume:
     label: str        # ボリュームラベル
     kind: str         # "removable" / "fixed" / "virtual" / "unknown" / "unreadable"
     error: str = ""   # kind=="unreadable" のとき、読めない理由
+    serial: str = ""  # ボリュームシリアル（フォーマット時に付く番号。ファイルを消しても変わらない。例: "1A2B-3C4D"）
 
     def join(self, *parts: str) -> str:
         return os.path.join(self.root, *parts)
@@ -44,6 +45,7 @@ class VolumeDiag:
     error: int
     included: bool
     reason: str
+    serial: str = ""
 
 
 def _windows_enumerate() -> list[VolumeDiag]:
@@ -100,8 +102,10 @@ def _windows_enumerate() -> list[VolumeDiag]:
                 included, reason = False, f"ボリューム情報を取得できません (Win32 error {err})"
             else:
                 included, reason = True, ""
+            ser = f"{serial.value >> 16:04X}-{serial.value & 0xFFFF:04X}" if ok and serial.value else ""
             out.append(VolumeDiag(guid=guid_path, drive_type=dtype, mounts=mounts, label=label_buf.value,
-                                  fs=fs_buf.value, info_ok=ok, error=err, included=included, reason=reason))
+                                  fs=fs_buf.value, info_ok=ok, error=err, included=included, reason=reason,
+                                  serial=ser))
             if not k32.FindNextVolumeW(h, buf, len(buf)):
                 break
     finally:
@@ -125,7 +129,7 @@ def _windows_volumes() -> list[Volume]:
         kind = "removable" if d.drive_type == DRIVE_REMOVABLE else ("fixed" if d.drive_type == DRIVE_FIXED else "unknown")
         # アクセスはレターがあればレター経由（エクスプローラーと同じ見え方）、無ければGUIDパス
         root = d.mounts[0] if d.mounts else d.guid
-        results.append(Volume(key=d.guid, root=root, display=display, label=d.label, kind=kind))
+        results.append(Volume(key=d.guid, root=root, display=display, label=d.label, kind=kind, serial=d.serial))
     return results
 
 

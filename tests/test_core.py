@@ -651,3 +651,32 @@ def test_convert_off_releases_pending_cards(env):
     s.convert_enabled = False
     Converter(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)._tick()
     assert ledger.latest_ingest_for_card("9").convert_pending == 0 and len(ledger.pending_nas()) == 1
+
+
+def test_lost_id_file_is_suggested_from_volume_serial(env, monkeypatch):
+    """id.txt を消してしまったカードは、前回取り込んだときのボリュームシリアルから ID の候補が出る。"""
+    import dataclasses
+    from camtrapdesk.core import ingest as I
+    s, ledger = env["settings"], env["ledger"]
+    root, _ = make_card(env["cards"], "650", n_files=2)
+    real = I.list_volumes
+
+    def with_serial(scan_roots=(), exclude=()):
+        return [dataclasses.replace(v, serial="1A2B-3C4D") if v.root.rstrip("/\\").endswith("vol_650") else v
+                for v in real(scan_roots, exclude)]
+
+    monkeypatch.setattr(I, "list_volumes", with_serial)
+    mgr, _ = run_ingest(env)
+    assert ledger.card_id_for_serial("1A2B-3C4D")[0] == "650"
+    # id.txt を消す（フォーマットではないのでシリアルは同じ）
+    os.remove(os.path.join(root, "id.txt"))
+    mgr2 = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=lambda m: None)
+    mgr2.rescan_now()
+    assert not mgr2.jobs
+    (key, (v, reason)), = mgr2.others.items()
+    assert mgr2.suggested_ids[key] == "650" and "前回このカードは ID 650" in reason
+    ok, _msg = mgr2.assign_card_id(key, mgr2.suggested_ids[key])
+    assert ok
+    mgr2.rescan_now()
+    assert {j.card.card_id for j in mgr2.jobs.values()} == {"650"}
+    mgr2.stop()

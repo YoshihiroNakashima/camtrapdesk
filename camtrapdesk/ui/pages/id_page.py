@@ -23,7 +23,9 @@ class IdPage(QWidget):
             "<b>新しいSDカードを使い始めるときに一度だけ行います。</b><br>"
             "カードの直下に id.txt（カードの番号）を書き込みます。番号はカードに貼ったラベルと同じにしてください。"
             "一度付ければ、以後はカードを挿すだけで番号が読み取られ、野帳の回収SD列と照合されます。<br>"
-            "すでにIDがあるカードには何もしません（書き換えたいときはカードの id.txt を直接編集してください）。")
+            "すでにIDがあるカードには何もしません（書き換えたいときはカードの id.txt を直接編集してください）。<br>"
+            "id.txt を消してしまったカードは、以前の取り込みで覚えたボリュームの番号から前回のIDを候補に入れます"
+            "（フォーマットした場合は番号が変わるので、カードのラベルを見て入力してください）。")
         info.setWordWrap(True)
         root.addWidget(info)
 
@@ -54,14 +56,21 @@ class IdPage(QWidget):
         rows: list[tuple[str, object, str, str]] = []
         for key, job in self.ctx.ingest.jobs.items():
             rows.append((key, job.card.volume, job.card.card_id, "ID あり"))
+        suggested = dict(self.ctx.ingest.suggested_ids)
         for key, (v, reason) in self.ctx.ingest.others.items():
-            rows.append((key, v, "", "読めません: " + reason if v.kind == "unreadable" else "ID なし"))
+            if v.kind == "unreadable":
+                state = "読めません: " + reason
+            elif key in suggested:
+                state = f"ID なし（前回は {suggested[key]}。候補を入れました）"
+            else:
+                state = "ID なし"
+            rows.append((key, v, "", state))
         rows.sort(key=lambda r: self.ctx.slot_sort_key(r[1]))
         self.rows = rows
         self.table.setRowCount(len(rows))
         for i, (key, v, cid, state) in enumerate(rows):
             color = COLORS["ok"] if cid else (COLORS["err"] if v.kind == "unreadable" else COLORS["warn"])
-            set_row(self.table, i, [self.ctx.slot_label(v), v.label, cid, state, "", ""], color)
+            set_row(self.table, i, [self.ctx.slot_label(v), v.label, cid, state, suggested.get(key, "") if not cid else "", ""], color)
             it = self.table.item(i, self.COL_INPUT)
             if cid or v.kind == "unreadable":
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
