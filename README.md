@@ -43,7 +43,7 @@
 
 GitHub の Releases ページから、OS に合うものを 1 つダウンロードする。
 
-- **Windows**: `camtrapdesk-windows.exe`。好きな場所に置いてダブルクリックするだけ。初回は Windows の SmartScreen が「WindowsによってPCが保護されました」と出すので、「詳細情報」→「実行」。1 ファイルに全部入っているので、起動に数秒かかる（展開のため）。
+- **Windows**: `camtrapdesk-windows.zip`。展開して出てくる `camtrapdesk` フォルダを好きな場所（デスクトップや D:\ など）に置き、中の `camtrapdesk.exe` をダブルクリック。フォルダの中の他のファイル（`_internal` など）は動かさない。初回は Windows の SmartScreen が「WindowsによってPCが保護されました」と出すので、「詳細情報」→「実行」。ウイルス対策ソフト（AVG など）が止めた場合は、その隔離から復元してフォルダごと除外に入れる。
 - **Mac（M1 以降）**: `camtrapdesk-macos-apple-silicon.zip`。展開して `camtrapdesk.app` を「アプリケーション」に入れる。
 - **Mac（Intel）**: `camtrapdesk-macos-intel.zip`。同じ手順。
 
@@ -62,8 +62,8 @@ push だけでも（タグ無し）テストとビルドは走り、Actions の�
 
 ```bash
 pip install -e ".[dev]"
-pyinstaller --noconfirm --clean --windowed --onefile --name camtrapdesk --paths . --collect-all openpyxl tools/entry.py   # Windows
-pyinstaller --noconfirm --clean --windowed --name camtrapdesk --paths . --collect-all openpyxl tools/entry.py             # Mac → dist/camtrapdesk.app
+pyinstaller --noconfirm --clean --windowed --name camtrapdesk --paths . --collect-all openpyxl --collect-all imageio_ffmpeg tools/entry.py   # Windows → dist/camtrapdesk/（フォルダごと配る）
+pyinstaller --noconfirm --clean --windowed --name camtrapdesk --paths . --collect-all openpyxl --collect-all imageio_ffmpeg tools/entry.py   # Mac → dist/camtrapdesk.app
 ```
 
 ### フォルダごと渡して起動する（Python が入っている PC）

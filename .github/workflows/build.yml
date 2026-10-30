@@ -58,9 +58,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          pyinstaller --noconfirm --clean --windowed --onefile --name camtrapdesk --paths . --collect-all openpyxl --collect-all imageio_ffmpeg tools/entry.py
-          # アーティファクトの中でフォルダが付かないよう、zip と同じくリポジトリ直下に置く
-          mv dist/camtrapdesk.exe ./camtrapdesk-windows.exe
+          # 1 ファイル形式（--onefile）は起動時に一時フォルダへ展開するため、AVG などのウイルス対策に止められて
+          # 「Failed to start embedded python interpreter」になることがある。フォルダ形式にして zip で配る
+          pyinstaller --noconfirm --clean --windowed --name camtrapdesk --paths . --collect-all openpyxl --collect-all imageio_ffmpeg tools/entry.py
+          cd dist && 7z a -r ../camtrapdesk-windows.zip camtrapdesk > /dev/null && cd ..
+          ls -la camtrapdesk-windows.zip
       - name: Build (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -70,10 +72,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            camtrapdesk-windows.exe
-            ${{ matrix.artifact }}.zip
-          if-no-files-found: ignore
+          path: ${{ matrix.artifact }}.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
@@ -91,10 +90,10 @@ jobs:
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           files: |
-            dist/**/camtrapdesk-windows.exe
+            dist/**/camtrapdesk-windows.zip
             dist/**/camtrapdesk-macos-apple-silicon.zip
             dist/**/camtrapdesk-macos-intel.zip
           body: |
-            - Windows: `camtrapdesk-windows.exe` をダウンロードしてダブルクリック（Python 不要）。初回は SmartScreen の「詳細情報」→「実行」。
+            - Windows: `camtrapdesk-windows.zip` をダウンロードして展開し、中の `camtrapdesk` フォルダを好きな場所に置いて `camtrapdesk.exe` をダブルクリック（Python 不要。フォルダの中身は動かさない）。初回は SmartScreen の「詳細情報」→「実行」。
             - Mac (M1 以降): `camtrapdesk-macos-apple-silicon.zip` を展開し、camtrapdesk.app をアプリケーションに入れる。初回は「システム設定 > プライバシーとセキュリティ」で「このまま開く」。
             - Mac (Intel): `camtrapdesk-macos-intel.zip`。手順は同じ。
