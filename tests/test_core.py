@@ -1255,3 +1255,71 @@ def test_repair_helpers(tmp_path):
     log = "camtrapdesk repair\n\n=== chkdsk F: ===\nファイル システムの種類は FAT32 です。\nWindows はファイル システムを検査し、問題を修復しました。\n[exit 0]\n"
     s = summarize_repair_log(log)
     assert "F:: Windows はファイル システムを検査し、問題を修復しました。" in s and "F:: [exit 0]" in s
+
+
+# ----------------------------------------------------------------------------
+# 途中で止める
+# ----------------------------------------------------------------------------
+
+def test_stop_ingest_midway_and_resume(env):
+    """コピー中に止めると「停止」になり、書きかけは消え、やり直すと検証済みのファイルを飛ばして続きから完了する。"""
+    from camtrapdesk.core.ingest import S_STOPPED
+    s, ledger = env["settings"], env["ledger"]
+    s.concurrency = 1
+    make_card(env["cards"], "264", n_files=6, size=3_000_000)
+    logs = []
+    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=logs.append, armed=True)
+    hold = threading.Event()
+    stopped = threading.Event()
+    real = mgr._ingest_card
+
+    # 2 ファイル目のコピーが終わった時点で止める（on_update の中から）
+    def on_update(job):
+        if job.done_files >= 2 and not stopped.is_set():
+            stopped.set()
+            mgr.cancel_jobs()
+    mgr.on_update = on_update
+    mgr.start()
+    t0 = time.time()
+    while time.time() - t0 < 30:
+        mgr.rescan_now()
+        jobs = list(mgr.jobs.values())
+        if jobs and jobs[0].state == S_STOPPED:
+            break
+        time.sleep(0.1)
+    job = next(iter(mgr.jobs.values()))
+    assert job.state == S_STOPPED and "続きから" in job.message, (job.state, job.message, logs)
+    d = env["dest"] / "N260710" / "264"
+    assert not list(d.glob("*.part"))
+    done_before = sorted(p.name for p in d.iterdir() if p.suffix == ".MP4")
+    assert 1 <= len(done_before) < 6
+    ing = ledger.latest_ingest_for_card("264")
+    assert ing.status == L.STATUS_ERROR and ing.message == "停止"
+    # やり直す → 続きから
+    mgr.enqueue(job.key)
+    t0 = time.time()
+    while time.time() - t0 < 30 and job.state != S_DONE:
+        time.sleep(0.1)
+    mgr.stop()
+    assert job.state == S_DONE, (job.state, job.message, logs)
+    assert any("再開" in m for m in logs)
+    ing2 = ledger.latest_ingest_for_card("264")
+    assert ing2.status == L.STATUS_STAGED and ing2.id != ing.id
+    assert sorted(p.name for p in d.iterdir() if p.suffix == ".MP4") == [f"IMG_{i:04d}.MP4" for i in range(6)]
+
+
+def test_cancel_queued_job_before_it_starts(env):
+    from camtrapdesk.core.ingest import S_QUEUED, S_STOPPED
+    s, ledger = env["settings"], env["ledger"]
+    make_card(env["cards"], "264", n_files=2)
+    mgr = IngestManager(lambda: s, ledger, on_update=lambda j: None, on_log=lambda m: None, armed=False)
+    mgr.rescan_now()      # start() していないのでプールは無く、enqueue しても走らない
+    key = next(iter(mgr.jobs))
+    mgr.enqueue(key)
+    assert mgr.jobs[key].state == S_QUEUED
+    assert mgr.cancel_jobs([key]) == 1
+    assert mgr.jobs[key].state == S_STOPPED and mgr.jobs[key].cancel
+    mgr.start()
+    mgr._run_job(key)     # 始まる前に cancel を見て何もしない
+    assert mgr.jobs[key].state == S_STOPPED and ledger.latest_ingest_for_card("264") is None
+    mgr.stop()

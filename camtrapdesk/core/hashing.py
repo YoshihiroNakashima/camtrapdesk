@@ -39,13 +39,26 @@ def hash_file(path: str, progress: Progress | None = None) -> str:
     return prefix + h.hexdigest()
 
 
-def copy_with_hash(src: str, dst: str, progress: Progress | None = None) -> tuple[int, str]:
-    """src を dst にコピーしながらハッシュを計算する。更新日時もコピーする。"""
+class CopyCancelled(RuntimeError):
+    """should_stop が True を返したので途中でやめた（.part は消してある）。"""
+
+
+def copy_with_hash(src: str, dst: str, progress: Progress | None = None,
+                   should_stop: Callable[[], bool] | None = None) -> tuple[int, str]:
+    """src を dst にコピーしながらハッシュを計算する。更新日時もコピーする。
+    should_stop が True を返したら 4 MB 単位の切れ目でやめ、書きかけの .part を消して CopyCancelled を投げる。"""
     prefix, h = _new_hasher()
     done = 0
     tmp = dst + ".part"
     with open(src, "rb", buffering=0) as fi, open(tmp, "wb", buffering=0) as fo:
         while True:
+            if should_stop is not None and should_stop():
+                fo.close()
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                raise CopyCancelled("停止されました")
             chunk = fi.read(CHUNK)
             if not chunk:
                 break

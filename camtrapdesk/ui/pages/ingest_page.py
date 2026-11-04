@@ -55,7 +55,10 @@ class IngestPage(QWidget):
         self.arm_btn = QPushButton("取り込みを開始")
         self.arm_btn.setToolTip("保存先・フォルダ名・NAS を確認してから、挿さっているカードを始めます。以後、挿したカードは自動で始まります")
         self.arm_btn.clicked.connect(self._arm_clicked)
-        self.start_btn = QPushButton("エラー・スキップ分をやり直す")
+        self.stop_btn = QPushButton("取り込みを停止")
+        self.stop_btn.setToolTip("一覧で選んだカード（選んでいなければ全部）のコピーを止めます。止めたカードは「やり直す」で検証済みのファイルを飛ばして続きから再開できます")
+        self.stop_btn.clicked.connect(self._stop_clicked)
+        self.start_btn = QPushButton("エラー・停止・スキップ分をやり直す")
         self.start_btn.clicked.connect(self._start_all)
         self.rescan_btn = QPushButton("再スキャン")
         self.rescan_btn.clicked.connect(lambda: self.ctx.ingest.rescan_now())
@@ -67,7 +70,7 @@ class IngestPage(QWidget):
         self.repair_btn = QPushButton("カードを修復（chkdsk）…")
         self.repair_btn.setToolTip("壊れたファイルのあったカードや「読めません」のカードを、取り込みが終わってから Windows の chkdsk でまとめて修復します")
         self.repair_btn.clicked.connect(lambda: self.open_repair())
-        for w in (self.arm_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.diag_btn, self.repair_btn):
+        for w in (self.arm_btn, self.stop_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.diag_btn, self.repair_btn):
             ops.addWidget(w)
         ops.addStretch(1)
         self.summary_label = QLabel("")
@@ -242,8 +245,43 @@ class IngestPage(QWidget):
 
     def _start_all(self) -> None:
         for key, job in list(self.ctx.ingest.jobs.items()):
-            if job.state in (I.S_DETECTED, I.S_ERROR, I.S_SKIPPED) and not job.card.problems:
+            if job.state in (I.S_DETECTED, I.S_ERROR, I.S_SKIPPED, I.S_STOPPED) and not job.card.problems:
                 self.ctx.ingest.enqueue(key)
+
+    def _selected_keys(self) -> list[str]:
+        rows = {i.row() for i in self.table.selectedIndexes()}
+        keys = []
+        for r in rows:
+            it = self.table.item(r, 1)
+            key = it.data(Qt.ItemDataRole.UserRole) if it else None
+            if key:
+                keys.append(key)
+        return keys
+
+    def _stop_clicked(self) -> None:
+        ing = self.ctx.ingest
+        busy = (I.S_QUEUED, I.S_WAITING, I.S_COPYING, I.S_VERIFYING)
+        selected = [k for k in self._selected_keys() if k in ing.jobs and ing.jobs[k].state in busy]
+        if selected:
+            keys, what = selected, f"選んだ {len(selected)} 枚"
+        else:
+            keys = [k for k, j in ing.jobs.items() if j.state in busy]
+            what = f"進行中・待機中の全部（{len(keys)} 枚）"
+        if not keys:
+            QMessageBox.information(self, "取り込みを停止", "止めるカードがありません（コピー中・待機中のカードが無い）。")
+            return
+        msg = (f"{what}のコピーを止めます。書きかけのファイルは消し、検証が済んだファイルは残ります。\n"
+               "止めたカードは「エラー・停止・スキップ分をやり直す」で続きから再開できます。\n")
+        if not selected:
+            msg += "以後に挿したカードの自動開始も止めます。\n"
+        msg += "\n止めますか？"
+        if QMessageBox.question(self, "取り込みを停止", msg) != QMessageBox.StandardButton.Yes:
+            return
+        if not selected:
+            ing.disarm()
+            self._refresh_arm_button()
+        n = ing.cancel_jobs(keys)
+        self._append_log(f"取り込みを停止しました（{n} 枚）")
 
     def _clear_done(self) -> None:
         for key, job in list(self.ctx.ingest.jobs.items()):
@@ -333,12 +371,12 @@ class IngestPage(QWidget):
         jobs = sorted(self.ctx.ingest.jobs.values(), key=lambda j: volume_sort_key(j.card.volume))
         others = sorted(self.ctx.ingest.others.values(), key=lambda o: volume_sort_key(o[0]))
         self.table.setRowCount(len(jobs) + len(others))
-        n_done = n_active = n_err = 0
+        n_done = n_active = n_err = n_stopped = 0
         for r, job in enumerate(jobs):
             st = job.state
             color = {I.S_DONE: COLORS["ok"], I.S_ERROR: COLORS["err"], I.S_SKIPPED: COLORS["muted"],
                      I.S_COPYING: COLORS["info"], I.S_VERIFYING: COLORS["info"], I.S_REMOVED: COLORS["warn"],
-                     I.S_WAITING: COLORS["warn"]}.get(st)
+                     I.S_WAITING: COLORS["warn"], I.S_STOPPED: COLORS["warn"]}.get(st)
             prog = f"{job.progress*100:.0f}%" if st in (I.S_COPYING, I.S_VERIFYING) else ("100%" if st == I.S_DONE else "")
             spd = job.speed_mbps
             if prog and spd:
@@ -346,12 +384,15 @@ class IngestPage(QWidget):
             set_row(self.table, r, [job.card.volume.display, job.card.card_id, str(job.card.n_files),
                                     human_size(job.card.total_bytes), I.STATE_LABELS.get(st, st), prog, job.message],
                     color)
+            self.table.item(r, 1).setData(Qt.ItemDataRole.UserRole, job.key)
             if st == I.S_DONE:
                 n_done += 1
             elif st in (I.S_QUEUED, I.S_WAITING, I.S_COPYING, I.S_VERIFYING):
                 n_active += 1
             elif st == I.S_ERROR:
                 n_err += 1
+            elif st == I.S_STOPPED:
+                n_stopped += 1
         n_noid = n_unread = 0
         for i, (v, reason) in enumerate(others):
             r = len(jobs) + i
@@ -368,4 +409,6 @@ class IngestPage(QWidget):
             extra += f" / IDなし {n_noid}"
         if n_unread:
             extra += f" / 読めません {n_unread}"
+        if n_stopped:
+            extra += f" / 停止 {n_stopped}"
         self.summary_label.setText(f"検出 {len(jobs)} 枚 / 処理中 {n_active} / 完了 {n_done} / エラー {n_err}{extra}")
