@@ -303,6 +303,11 @@ class IngestPage(QWidget):
             text = f"診断でエラー: {e}"
         jobs = ", ".join(f"{j.card.volume.display}={j.card.card_id}" for j in self.ctx.ingest.jobs.values())
         text += f"\n\nアプリが検出中のカード ({len(self.ctx.ingest.jobs)}): {jobs}"
+        from ...core.repair import notification_senders
+        senders = notification_senders()
+        if senders:
+            text += "\n\nWindows の通知の送信元（設定 > 通知 に出るもの。Enabled=0 はオフ）:\n" + "\n".join(
+                f"  {name}: {'オフ' if en == 0 else ('オン' if en == 1 else '既定')}" for name, en in senders)
         dlg = QDialog(self)
         dlg.setWindowTitle("ボリューム診断")
         dlg.resize(1100, 600)
@@ -328,13 +333,14 @@ class IngestPage(QWidget):
         win = self.window()
         if hasattr(win, "notify"):
             win.notify("取り込み完了", f"{n}枚のカードが完了しました。入れ替えてください。")
-        # 読めないファイルのあったカードは、いまのうちに修復を勧める（データは取り込み済みなので安全）
-        broken = [j for j in self.ctx.ingest.jobs.values() if j.state == I.S_DONE and j.n_broken and not getattr(j, "repair_offered", False)]
+        # 読めないファイルのあったカードと Windows が修復を勧めるカードは、いまのうちに修復を勧める（データは取り込み済みなので安全）
+        broken = [j for j in self.ctx.ingest.jobs.values()
+                  if j.state == I.S_DONE and (j.n_broken or j.card.needs_repair) and not j.repair_offered]
         if broken and self.ctx.settings.repair_after_ingest and sys.platform == "win32":
             for j in broken:
                 j.repair_offered = True
             ids = ", ".join(j.card.card_id for j in broken[:10]) + ("…" if len(broken) > 10 else "")
-            msg = (f"{len(broken)} 枚のカードに壊れたファイルがありました（{ids}）。\n"
+            msg = (f"{len(broken)} 枚のカードは修復が必要なようです（壊れたファイル、または Windows の警告）: {ids}\n"
                    "データは取り込み済みです。いまこれらのカードを Windows の chkdsk で修復しますか？\n"
                    "（管理者の許可を求める画面が 1 回出ます。あとで「カードを修復（chkdsk）…」からもできます）")
             if QMessageBox.question(self, "カードの修復", msg) == QMessageBox.StandardButton.Yes:

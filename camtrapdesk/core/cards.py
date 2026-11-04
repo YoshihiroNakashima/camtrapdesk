@@ -89,6 +89,7 @@ class Card:
     files: list[MediaFile] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)   # 取り込みを止めるべき問題
     warnings: list[str] = field(default_factory=list)   # 取り込みは行うが表示する注意
+    needs_repair: bool = False    # Windows のダーティビットが立っている（「スキャンして修復しますか」が出るカード）
 
     @property
     def total_bytes(self) -> int:

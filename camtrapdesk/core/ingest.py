@@ -106,11 +106,13 @@ class IngestManager:
     def __init__(self, get_settings: Callable[[], Settings], ledger: L.Ledger,
                  on_update: Callable[[CardJob], None], on_log: Callable[[str], None],
                  on_batch_done: Callable[[int], None] | None = None,
-                 armed: bool = False):
+                 armed: bool = False, on_arm_change: Callable[[bool], None] | None = None):
         self.get_settings = get_settings
         # armed: 「取り込みを開始」で保存先などを確認してもらってから、挿したカードを自動で始める。
         # 起動直後は False で、検出したカードは「開始待ち」で止まる（設定が違うまま勝手にコピーしないため）
         self.armed = armed
+        self.on_arm_change = on_arm_change
+        self._dirty_cache: dict[str, bool] = {}   # ボリューム → ダーティビット（検出のたびに読まない）
         self.ledger = ledger
         self.on_update = on_update
         self.on_log = on_log
@@ -154,6 +156,8 @@ class IngestManager:
 
     def arm(self) -> int:
         """自動開始を有効にし、いま開始待ちのカードをすべて始める。戻り値は始めた枚数。"""
+        if not self.armed and self.on_arm_change:
+            self.on_arm_change(True)
         self.armed = True
         n = 0
         with self._lock:
@@ -165,6 +169,8 @@ class IngestManager:
 
     def disarm(self) -> None:
         """新しく挿したカードの自動開始を止める（進行中のコピーは続く）。"""
+        if self.armed and self.on_arm_change:
+            self.on_arm_change(False)
         self.armed = False
 
     def cancel_jobs(self, keys: "list[str] | None" = None) -> int:
@@ -270,6 +276,7 @@ class IngestManager:
             self.others = others
             self.suggested_ids = suggested
         self._skipped_reported &= {v.key for v in vols}
+        self._dirty_cache = {k: v for k, v in self._dirty_cache.items() if k in present}
         new_jobs: list[CardJob] = []
         with self._lock:
             # 抜かれたカード
@@ -285,6 +292,16 @@ class IngestManager:
             for c in cards:
                 if c.volume.key in self.jobs:
                     continue
+                # Windows が「スキャンして修復しますか」と言うカード（ダーティビット）は、取り込み後に修復するものとして印を付ける
+                if c.volume.key not in self._dirty_cache:
+                    from .repair import volume_is_dirty
+                    try:
+                        self._dirty_cache[c.volume.key] = bool(volume_is_dirty(c.volume))
+                    except Exception:
+                        self._dirty_cache[c.volume.key] = False
+                c.needs_repair = self._dirty_cache[c.volume.key]
+                if c.needs_repair:
+                    c.warnings.insert(0, "Windows が修復を勧めているカード（壊れたファイルの疑い）。取り込みが終わってから修復します")
                 job = CardJob(key=c.volume.key, card=c, total_bytes=c.total_bytes)
                 if c.problems:
                     job.state = S_ERROR
@@ -585,6 +602,8 @@ class IngestManager:
             where = "中継から消しました" if s.broken_action != "keep" else "_破損 フォルダに移しました"
             broken_note = f"。壊れていた {len(broken)} ファイルは{where}（カードを消すときに一緒に消えます"
             broken_note += "。読めないファイルがあったので、取り込みが終わったらカードの修復をおすすめします）" if n_unread else "）"
+        if card.needs_repair:
+            broken_note += "。このカードは修復が必要なようです（Windows の警告）。取り込みが終わったら「カードを修復」で直してください"
         self._set(job, S_DONE, f"完了: {len(good_files)}ファイル検証済み{broken_note}{nas_note}")
         self.on_log(f"[{cid}] 完了（{len(good_files)}ファイル, {card.total_bytes/1e9:.2f} GB"
                     + (f"、壊れたファイル {len(broken)} 件" if broken else "") + "）")

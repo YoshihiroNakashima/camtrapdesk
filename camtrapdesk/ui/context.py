@@ -12,7 +12,7 @@ from ..core.convert import Converter
 from ..core.ingest import CardJob, IngestManager
 from ..core.ledger import Ledger
 from ..core.nas_sync import NasSyncer
-from ..core.repair import ScanDialogDismisser
+from ..core.repair import ScanDialogDismisser, ToastSuppressor
 
 
 class AppContext(QObject):
@@ -34,10 +34,15 @@ class AppContext(QObject):
         self.settings: Settings = load_settings()
         self.ledger = Ledger(os.path.join(config_dir(), "ledger.sqlite"))
         self._apply_match_mode()
+        # 取り込みを始めてから止めるまで、Windows の通知ポップアップ（「スキャンして修復しますか」など）を止める
+        self.toasts = ToastSuppressor(os.path.join(config_dir(), "toasts_before.json"))
+        if self.toasts.restore_leftover():
+            self.log_message.emit("前回戻し損ねていた Windows の通知の設定を元に戻しました")
         self.ingest = IngestManager(self.get_settings, self.ledger,
                                     on_update=self.job_updated.emit,
                                     on_log=self.log_message.emit,
-                                    on_batch_done=self.ingest_batch_done.emit)
+                                    on_batch_done=self.ingest_batch_done.emit,
+                                    on_arm_change=self._arm_changed)
         self.nas = NasSyncer(self.get_settings, self.ledger,
                              on_status=self.nas_status.emit,
                              on_log=self.log_message.emit,
@@ -62,6 +67,14 @@ class AppContext(QObject):
         s = self.settings
         return (s.dest_root, s.nas_root, s.season_folder.strip(), s.convert_enabled, tuple(s.media_subdirs),
                 s.broken_check, s.broken_action)
+
+    def _arm_changed(self, armed: bool) -> None:
+        if armed:
+            if self.settings.suppress_toasts_while_ingesting and self.toasts.suppress():
+                self.log_message.emit("取り込みの間、Windows の通知ポップアップ（右下）を止めます。「自動開始を止める」かアプリの終了で元に戻します")
+        else:
+            if self.toasts.restore():
+                self.log_message.emit("Windows の通知の設定を元に戻しました")
 
     def _maybe_wake_nas(self, job: CardJob) -> None:
         from ..core.ingest import S_DONE
@@ -102,6 +115,7 @@ class AppContext(QObject):
 
     def stop_background(self) -> None:
         self.dismisser.stop()
+        self.toasts.restore()
         self.ingest.stop()
         self.converter.stop()
         self.nas.stop()

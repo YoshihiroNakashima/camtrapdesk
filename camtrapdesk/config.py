@@ -67,6 +67,7 @@ class Settings:
     broken_action: str = "delete"        # delete: 中継から消す / keep: カードフォルダ内の _破損 に移して残す（NAS には送らない）
     auto_dismiss_scan_dialog: bool = True   # Windows の「スキャンして修復しますか」を自動で「スキャンせずに続行」にする
     repair_after_ingest: bool = True        # 取り込みの一括が終わったとき、読めないファイルのあったカードの修復（chkdsk）を提案する
+    suppress_toasts_while_ingesting: bool = True   # 「取り込みを開始」から止めるまで、Windows の通知ポップアップ（右下）を止める
     # --- 野帳 ---
     fieldnote_path: str = field(default_factory=_default_fieldnote_path)
     fieldnote_sheet: str = ""      # 空なら最初のシート

@@ -65,8 +65,9 @@ class SettingsPage(QWidget):
         g6 = QGroupBox("壊れたファイル（Windows で「スキャンして修復しますか」と出るカード）")
         f6 = QFormLayout(g6)
         f6.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        note6 = QLabel("カメラは電圧低下などで動画を途中までしか書けないことがあります。そのダイアログはアプリが自動で「スキャンせずに続行」にします"
-                       "（ダイアログはファイルの読み書きを止めないので、閉じるだけで取り込めます）。"
+        note6 = QLabel("カメラは電圧低下などで動画を途中までしか書けないことがあります。そういうカードは一覧に「修復が必要なようです」と出ます。"
+                       "右下の通知は取り込みの間だけ止め、ダイアログが出た場合は自動で「スキャンせずに続行」にします"
+                       "（どちらもファイルの読み書きを止めるものではないので、取り込みはそのまま進みます）。"
                        "「ファイルまたはディレクトリが壊れている」と読めないファイルは、そのファイルだけ飛ばして残りを取り込み、"
                        "コピーできたファイルも中継の上で調べて壊れたものを取り除きます。壊れたファイルは NAS には送らず、「3. カードを消す」でカードからも消えます。"
                        "読めなかったファイルがあったカードは、取り込みが終わってから「カードを修復（chkdsk）」で直せます。")
@@ -76,8 +77,11 @@ class SettingsPage(QWidget):
         self.broken_check.setChecked(s.broken_check)
         self.auto_dismiss = QCheckBox("Windows の「スキャンして修復しますか」を自動で「スキャンせずに続行」にする（推奨）")
         self.auto_dismiss.setChecked(s.auto_dismiss_scan_dialog)
-        self.repair_after = QCheckBox("取り込みの一括が終わったら、読めないファイルのあったカードの修復（chkdsk）を提案する")
+        self.repair_after = QCheckBox("取り込みの一括が終わったら、修復が必要そうなカードの修復（chkdsk）を提案する")
         self.repair_after.setChecked(s.repair_after_ingest)
+        self.suppress_toasts = QCheckBox("「取り込みを開始」から止めるまで、Windows の通知ポップアップ（右下）を止める（止めると元に戻す）")
+        self.suppress_toasts.setToolTip("設定アプリの「通知」のオン・オフと同じ切り替えを、取り込みの間だけ行います。他のアプリの通知も出なくなります")
+        self.suppress_toasts.setChecked(s.suppress_toasts_while_ingesting)
         self.broken_delete = QRadioButton("中継から消す（既定）")
         self.broken_keep = QRadioButton("カードのフォルダ内の _破損 に移して残す（確認したいとき）")
         (self.broken_keep if s.broken_action == "keep" else self.broken_delete).setChecked(True)
@@ -85,6 +89,7 @@ class SettingsPage(QWidget):
         hb6.addWidget(self.broken_delete)
         hb6.addWidget(self.broken_keep)
         hb6.addStretch(1)
+        f6.addRow("", self.suppress_toasts)
         f6.addRow("", self.auto_dismiss)
         f6.addRow("", self.broken_check)
         f6.addRow("壊れたファイルの扱い", hb6)
@@ -225,7 +230,7 @@ class SettingsPage(QWidget):
         for w in (self.media_subdirs, self.media_ext, self.id_file, self.scan_roots, self.exclude, self.conv_ext,
                   self.col_station, self.col_ret, self.col_inst, self.station_prefix):
             w.editingFinished.connect(self._autosave)
-        for w in (self.media_recursive, self.broken_check, self.auto_dismiss, self.repair_after, self.broken_delete, self.broken_keep, self.verify,
+        for w in (self.media_recursive, self.broken_check, self.auto_dismiss, self.repair_after, self.suppress_toasts, self.broken_delete, self.broken_keep, self.verify,
                   self.nas_verify, self.nas_wait, self.cleanup, self.del_req_nas, self.tail_match):
             w.toggled.connect(self._autosave)
         for w in (self.min_size, self.min_count, self.concurrency, self.conv_crf, self.conv_parallel, self.station_digits):
@@ -335,6 +340,7 @@ class SettingsPage(QWidget):
         s.broken_action = "keep" if self.broken_keep.isChecked() else "delete"
         s.auto_dismiss_scan_dialog = self.auto_dismiss.isChecked()
         s.repair_after_ingest = self.repair_after.isChecked()
+        s.suppress_toasts_while_ingesting = self.suppress_toasts.isChecked()
         s.concurrency = int(self.concurrency.value())
         s.verify_readback = self.verify.isChecked()
         s.nas_verify_readback = self.nas_verify.isChecked()

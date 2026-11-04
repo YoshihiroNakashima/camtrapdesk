@@ -1323,3 +1323,16 @@ def test_cancel_queued_job_before_it_starts(env):
     mgr._run_job(key)     # 始まる前に cancel を見て何もしない
     assert mgr.jobs[key].state == S_STOPPED and ledger.latest_ingest_for_card("264") is None
     mgr.stop()
+
+
+def test_repair_windows_only_helpers_are_safe_elsewhere(tmp_path):
+    """Windows 専用の機能（ダーティビット、通知の抑止、送信元一覧）は、他の OS では何もせずに安全に返る。"""
+    import sys
+    from camtrapdesk.core.repair import ToastSuppressor, notification_senders, volume_is_dirty
+    from camtrapdesk.core.volumes import Volume
+    v = Volume(key=str(tmp_path), root=str(tmp_path) + os.sep, display="x", label="x", kind="virtual")
+    assert volume_is_dirty(v) is None
+    ts = ToastSuppressor(str(tmp_path / "toasts.json"))
+    if sys.platform != "win32":
+        assert ts.suppress() is False and ts.restore() is False and ts.restore_leftover() is False
+        assert notification_senders() == []

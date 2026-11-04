@@ -24,8 +24,15 @@ def _card_rows(ctx: AppContext) -> list[tuple[object, str, bool]]:
         if job.state in busy:
             continue
         v = job.card.volume
-        pick = job.n_broken > 0 or job.state == I.S_ERROR
-        note = f"壊れたファイル {job.n_broken} 件" if job.n_broken else ("エラー" if job.state == I.S_ERROR else "")
+        pick = job.n_broken > 0 or job.state == I.S_ERROR or job.card.needs_repair
+        notes = []
+        if job.n_broken:
+            notes.append(f"壊れたファイル {job.n_broken} 件")
+        if job.card.needs_repair:
+            notes.append("Windows が修復を勧めている")
+        if job.state == I.S_ERROR:
+            notes.append("エラー")
+        note = "、".join(notes)
         rows.append((v, f"{v.display}　ID {job.card.card_id}　{note}".rstrip("　"), pick))
     for v, reason in sorted(ctx.ingest.others.values(), key=lambda o: o[0].display):
         pick = v.kind == "unreadable"

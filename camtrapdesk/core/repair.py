@@ -264,3 +264,149 @@ def summarize_repair_log(log: str) -> str:
         if re.search(r"エラー|修正|修復|problem|error|fixed|corrected|lost|失われ|converted|\[exit", s, re.IGNORECASE):
             out.append(f"{cur}: {s}" if cur else s)
     return "\n".join(out[:80])
+
+
+# ----------------------------------------------------------------------------
+# ダーティビット（Windows が「スキャンして修復」を勧める印）の読み取り
+# ----------------------------------------------------------------------------
+
+def volume_is_dirty(volume: Volume) -> bool | None:
+    """そのボリュームに Windows のダーティビット（正常に取り外されなかった／壊れている印）が立っているか。
+    Windows 以外や、読めなかったときは None。これが立っているカードは右下に「スキャンして修復しますか」の通知が出る。"""
+    if sys.platform != "win32" or volume.kind not in ("removable", "fixed", "unknown"):
+        return None
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    FSCTL_IS_VOLUME_DIRTY = 0x00090078
+    VOLUME_IS_DIRTY = 0x1
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING = 0x1, 0x2, 3
+    GENERIC_READ = 0x80000000
+    INVALID = wintypes.HANDLE(-1).value
+    d = (volume.display or "").strip()
+    if re.fullmatch(r"[A-Za-z]:", d):
+        path = "\\\\.\\" + d.upper()
+    else:
+        path = volume.key.rstrip("\\")   # \\?\Volume{...}
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                                wintypes.DWORD, wintypes.HANDLE]
+    k32.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
+                                    wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    for access in (0, GENERIC_READ):
+        h = k32.CreateFileW(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, 0, None)
+        if h == INVALID or h is None:
+            continue
+        try:
+            out = wintypes.DWORD(0)
+            ret = wintypes.DWORD(0)
+            ok = k32.DeviceIoControl(h, FSCTL_IS_VOLUME_DIRTY, None, 0, ctypes.byref(out), ctypes.sizeof(out),
+                                     ctypes.byref(ret), None)
+            if ok:
+                return bool(out.value & VOLUME_IS_DIRTY)
+        finally:
+            k32.CloseHandle(h)
+    return None
+
+
+# ----------------------------------------------------------------------------
+# Windows の通知（右下のポップアップ）を取り込みの間だけ止める
+# ----------------------------------------------------------------------------
+
+_TOAST_KEY = r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings"
+_TOAST_VALUE = "NOC_GLOBAL_SETTING_TOASTS_ENABLED"
+_PUSH_KEY = r"Software\Microsoft\Windows\CurrentVersion\PushNotifications"
+_PUSH_VALUE = "ToastEnabled"
+
+
+def _read_dword(root_key: str, name: str) -> int | None:
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, root_key) as k:
+            v, typ = winreg.QueryValueEx(k, name)
+            return int(v) if typ == winreg.REG_DWORD else None
+    except OSError:
+        return None
+
+
+def _write_dword(root_key: str, name: str, value: int | None) -> None:
+    import winreg
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, root_key) as k:
+        if value is None:
+            try:
+                winreg.DeleteValue(k, name)
+            except OSError:
+                pass
+        else:
+            winreg.SetValueEx(k, name, 0, winreg.REG_DWORD, int(value))
+
+
+class ToastSuppressor:
+    """Windows の通知ポップアップ（「スキャンして修復しますか」など）を、取り込みを始めてから止めるまでの間だけ止める。
+    設定アプリの「通知」のオン・オフと同じレジストリ値を書くので管理者権限は要らない。元の値は覚えておいて戻す。
+    アプリが落ちて戻せなかったときのために、元の値を state_path に残しておき、次の起動時に戻す。"""
+
+    def __init__(self, state_path: str):
+        self.state_path = state_path
+        self.active = False
+
+    def restore_leftover(self) -> bool:
+        """前回戻し損ねていれば戻す。戻したら True。"""
+        if sys.platform != "win32" or not os.path.isfile(self.state_path):
+            return False
+        try:
+            import json
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                prev = json.load(f)
+            _write_dword(_TOAST_KEY, _TOAST_VALUE, prev.get("toasts"))
+            _write_dword(_PUSH_KEY, _PUSH_VALUE, prev.get("push"))
+        except Exception:
+            return False
+        finally:
+            try:
+                os.remove(self.state_path)
+            except OSError:
+                pass
+        return True
+
+    def suppress(self) -> bool:
+        if sys.platform != "win32" or self.active:
+            return False
+        try:
+            import json
+            prev = {"toasts": _read_dword(_TOAST_KEY, _TOAST_VALUE), "push": _read_dword(_PUSH_KEY, _PUSH_VALUE)}
+            with open(self.state_path, "w", encoding="utf-8") as f:
+                json.dump(prev, f)
+            _write_dword(_TOAST_KEY, _TOAST_VALUE, 0)
+            _write_dword(_PUSH_KEY, _PUSH_VALUE, 0)
+        except Exception:
+            return False
+        self.active = True
+        return True
+
+    def restore(self) -> bool:
+        if not self.active:
+            return False
+        self.active = False
+        return self.restore_leftover()
+
+
+def notification_senders() -> list[tuple[str, int | None]]:
+    """通知の送信元（アプリ）ごとの設定の一覧（診断用）。(識別子, Enabled の値)。"""
+    if sys.platform != "win32":
+        return []
+    import winreg
+    out: list[tuple[str, int | None]] = []
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _TOAST_KEY) as k:
+            i = 0
+            while True:
+                try:
+                    name = winreg.EnumKey(k, i)
+                except OSError:
+                    break
+                i += 1
+                out.append((name, _read_dword(_TOAST_KEY + "\\" + name, "Enabled")))
+    except OSError:
+        pass
+    return out
