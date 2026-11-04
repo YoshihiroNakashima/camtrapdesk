@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "camtrapdesk"
-version = "0.1.0"
+version = "0.2.0"
 description = "カメラトラップのSDカード取り込み・NAS転送・地点名変更・削除をGUIで行うデスクトップアプリ"
 readme = "README.md"
 requires-python = ">=3.9"

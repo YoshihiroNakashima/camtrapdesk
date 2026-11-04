@@ -1,9 +1,15 @@
-"""設定画面。"""
+"""設定画面: 細かい項目だけ。値を変えるとそのまま保存される（「保存」ボタンは無い）。
+
+保存先・NAS・フォルダ名・変換のオンオフは「1. 取り込み」画面、野帳のファイルと絞り込みは「2. 地点名に変更」画面で指定する。
+"""
 
 from __future__ import annotations
 
+import time
+
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-                               QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget)
+                               QLineEdit, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QVBoxLayout,
+                               QWidget)
 
 from ...core.fieldnote import format_station
 from ..context import AppContext
@@ -14,25 +20,22 @@ class SettingsPage(QWidget):
     def __init__(self, ctx: AppContext, parent=None):
         super().__init__(parent)
         self.ctx = ctx
+        self._loading = True
         s = ctx.settings
         outer = QVBoxLayout(self)
+        top = QLabel("ここにあるのは普段は変えなくてよい項目です。値を変えるとその場で保存されます（「保存」ボタンはありません）。"
+                     "保存先・NAS・フォルダ名・動画の変換のオンオフは「1. 取り込み」画面で、野帳のファイルは「2. 地点名に変更」画面で指定します。")
+        top.setWordWrap(True)
+        outer.addWidget(top)
+        self.saved_label = QLabel("")
+        self.saved_label.setStyleSheet("color: #2e7d5a;")
+        outer.addWidget(self.saved_label)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         inner = QWidget()
         lay = QVBoxLayout(inner)
         scroll.setWidget(inner)
         outer.addWidget(scroll, 1)
-
-        # --- 保存先 ---
-        g1 = QGroupBox("保存先")
-        f1 = QFormLayout(g1)
-        f1.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.dest_root = PathRow(s.dest_root, "dir", placeholder=r"例: D:\CamTrap（中継HDD/SSD。NASを直接指定してもよい）")
-        self.nas_root = PathRow(s.nas_root, "dir", placeholder=r"例: \\DS2422\camtrap（空ならNAS転送なし）")
-        f1.addRow("中継先（または最終保存先）", self.dest_root)
-        f1.addRow("NASの最終保存先", self.nas_root)
-        f1.addRow("", QLabel("取り込み先のフォルダ名（調査回や調査地などの区切り）は「1. 取り込み」画面で、野帳のファイルは「2. 地点名に変更」画面で指定します。"))
-        lay.addWidget(g1)
 
         # --- カード内の対象 ---
         g2 = QGroupBox("SDカード内の対象")
@@ -50,12 +53,35 @@ class SettingsPage(QWidget):
         self.min_count.setValue(s.min_file_count)
         self.id_file = QLineEdit(s.id_file_name)
         f2.addRow("対象フォルダ（カンマ区切り）", self.media_subdirs)
+        f2.addRow("", QLabel("既定は Browning（DCIM/100_BTCF）。そのフォルダが無いカードは DCIM 以下をすべて探すので、他社のカメラでもたいていそのままで動きます"))
         f2.addRow("", self.media_recursive)
         f2.addRow("対象の拡張子", self.media_ext)
         f2.addRow("動画がこの枚数未満のカードはカメラ不調としてエラー（コピーしない）", self.min_count)
         f2.addRow("このサイズ未満（バイト）のファイルがあれば注意表示（コピーは行う）", self.min_size)
         f2.addRow("IDファイル名", self.id_file)
         lay.addWidget(g2)
+
+        # --- 壊れたファイル ---
+        g6 = QGroupBox("壊れたファイル（Windows で「スキャンして修復しますか」と出るカード）")
+        f6 = QFormLayout(g6)
+        f6.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        note6 = QLabel("カメラは電圧低下などで動画を途中までしか書けないことがあります。そのダイアログは「スキャンせずに続行」（閉じるだけでもよい）で、"
+                       "カードはそのまま取り込めます。取り込みでは全ファイルをコピーしてから中継の上で壊れたものを見つけ、取り除きます。"
+                       "壊れたファイルは NAS には送らず、「3. カードを消す」でカードからも消えます。")
+        note6.setWordWrap(True)
+        f6.addRow(note6)
+        self.broken_check = QCheckBox("コピー後に壊れた動画・画像を調べて取り除く（推奨）")
+        self.broken_check.setChecked(s.broken_check)
+        self.broken_delete = QRadioButton("中継から消す（既定）")
+        self.broken_keep = QRadioButton("カードのフォルダ内の _破損 に移して残す（確認したいとき）")
+        (self.broken_keep if s.broken_action == "keep" else self.broken_delete).setChecked(True)
+        hb6 = QHBoxLayout()
+        hb6.addWidget(self.broken_delete)
+        hb6.addWidget(self.broken_keep)
+        hb6.addStretch(1)
+        f6.addRow("", self.broken_check)
+        f6.addRow("壊れたファイルの扱い", hb6)
+        lay.addWidget(g6)
 
         # --- 挙動 ---
         g3 = QGroupBox("取り込み・転送・削除の挙動")
@@ -86,7 +112,7 @@ class SettingsPage(QWidget):
         self.poll.setValue(s.poll_interval_sec)
         self.scan_roots = QLineEdit(", ".join(s.scan_roots))
         self.exclude = QLineEdit(", ".join(s.exclude_volumes))
-        f3.addRow("同時にコピーするカード枚数", self.concurrency)
+        f3.addRow("同時にコピーするカード枚数（変更はアプリの再起動後に反映）", self.concurrency)
         f3.addRow("", self.verify)
         f3.addRow("", self.nas_verify)
         f3.addRow("", self.nas_wait)
@@ -100,11 +126,9 @@ class SettingsPage(QWidget):
         lay.addWidget(g3)
 
         # --- 動画の変換 ---
-        g5 = QGroupBox("動画の変換（任意）: AVI などを H.264 の mp4 にしてから NAS へ送る")
+        g5 = QGroupBox("動画の変換の詳細（オンオフは「1. 取り込み」画面）")
         f5 = QFormLayout(g5)
         f5.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.conv_enabled = QCheckBox("変換する（SD → 中継 は元のまま検証コピーし、中継の上で mp4 に変換して元ファイルを消す）")
-        self.conv_enabled.setChecked(s.convert_enabled)
         self.conv_ext = QLineEdit(", ".join(s.convert_extensions))
         self.conv_ext.setMaximumWidth(200)
         self.conv_crf = QSpinBox()
@@ -130,7 +154,6 @@ class SettingsPage(QWidget):
         self.ffmpeg_dl.clicked.connect(self._download_ffmpeg)
         self.ffmpeg_result = QLabel("")
         self.ffmpeg_result.setWordWrap(True)
-        f5.addRow("", self.conv_enabled)
         hc = QHBoxLayout()
         hc.addWidget(QLabel("変換する拡張子"))
         hc.addWidget(self.conv_ext)
@@ -155,15 +178,17 @@ class SettingsPage(QWidget):
         f4.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.col_station = QLineEdit(s.col_station)
         self.col_ret = QLineEdit(s.col_retrieval_sd)
+        self.col_inst = QLineEdit(s.col_installation_sd)
         self.tail_match = QCheckBox("カードIDは末尾の数字で照合する（id.txt の 6_650 と野帳の 650 を同じとみなす）")
         self.tail_match.setChecked(s.card_id_match_tail_number)
         cols = QHBoxLayout()
-        for lbl, w in (("地点名の列", self.col_station), ("回収したカードIDの列", self.col_ret)):
+        for lbl, w in (("地点名の列", self.col_station), ("回収したカードIDの列", self.col_ret), ("設置したカードIDの列（照合用、任意）", self.col_inst)):
             cols.addWidget(QLabel(lbl))
             cols.addWidget(w)
         cols.addStretch(1)
         f4.addRow("野帳の列名", cols)
-        note = QLabel("この2列だけ必須。どの行を使うか（Season や Type など）は「2. 地点名に変更」画面で列と値を指定して絞り込みます。大文字小文字や綴りの揺れは自動で読み替えます。")
+        note = QLabel("地点名と回収SDの2列だけ必須。どの行を使うか（Season や Type など）は「2. 地点名に変更」画面で列と値を指定して絞り込みます。"
+                      "大文字小文字や綴りの揺れは自動で読み替えます。設置SDの列は、設置記録との照合（同じ画面）を使うときだけ要ります。")
         note.setWordWrap(True)
         f4.addRow("", note)
         f4.addRow("", self.tail_match)
@@ -186,15 +211,22 @@ class SettingsPage(QWidget):
         self.station_digits.valueChanged.connect(self._update_example)
         self._update_example()
         lay.addWidget(g4)
-
-        # --- 保存 ---
-        hb = QHBoxLayout()
-        save = QPushButton("設定を保存")
-        save.clicked.connect(self.save)
-        hb.addStretch(1)
-        hb.addWidget(save)
-        lay.addLayout(hb)
         lay.addStretch(1)
+
+        # 値を変えたらそのまま保存する
+        for w in (self.media_subdirs, self.media_ext, self.id_file, self.scan_roots, self.exclude, self.conv_ext,
+                  self.col_station, self.col_ret, self.col_inst, self.station_prefix):
+            w.editingFinished.connect(self._autosave)
+        for w in (self.media_recursive, self.broken_check, self.broken_delete, self.broken_keep, self.verify,
+                  self.nas_verify, self.nas_wait, self.cleanup, self.del_req_nas, self.tail_match):
+            w.toggled.connect(self._autosave)
+        for w in (self.min_size, self.min_count, self.concurrency, self.conv_crf, self.conv_parallel, self.station_digits):
+            w.valueChanged.connect(self._autosave)
+        for w in (self.min_free, self.poll):
+            w.valueChanged.connect(self._autosave)
+        self.conv_encoder.currentIndexChanged.connect(self._autosave)
+        self.ffmpeg_path.changed.connect(self._autosave)
+        self._loading = False
 
     def _check_ffmpeg(self) -> None:
         from ...core.ffmpeg import candidate_status, detect_encoder, ffmpeg_candidates, find_ffmpeg, forget_ffmpeg
@@ -256,6 +288,7 @@ class SettingsPage(QWidget):
                 ok, msg = state["done"]
                 if ok:
                     self.ffmpeg_path.setText("")
+                    self._autosave()
                     self._check_ffmpeg()
                     QMessageBox.information(self, "ffmpeg", f"ffmpeg を入れました:\n{msg}")
                 else:
@@ -274,16 +307,24 @@ class SettingsPage(QWidget):
     def _split(text: str) -> list[str]:
         return [x.strip() for x in text.split(",") if x.strip()]
 
-    def save(self) -> None:
+    def _autosave(self, *_args) -> None:
+        if self._loading:
+            return
+        if self.save():
+            self.saved_label.setText(time.strftime("%H:%M:%S") + " 保存しました")
+
+    def save(self) -> bool:
+        """画面の値を設定に写して保存する。戻り値は何かが変わったか。"""
         s = self.ctx.settings
-        s.dest_root = self.dest_root.text()
-        s.nas_root = self.nas_root.text()
+        before = s.to_dict()
         s.media_subdirs = self._split(self.media_subdirs.text()) or ["DCIM/100_BTCF"]
         s.media_recursive = self.media_recursive.isChecked()
         s.media_extensions = [e.lstrip(".").lower() for e in self._split(self.media_ext.text())] or ["mp4"]
         s.min_file_size_bytes = int(self.min_size.value())
         s.min_file_count = int(self.min_count.value())
         s.id_file_name = self.id_file.text().strip() or "id.txt"
+        s.broken_check = self.broken_check.isChecked()
+        s.broken_action = "keep" if self.broken_keep.isChecked() else "delete"
         s.concurrency = int(self.concurrency.value())
         s.verify_readback = self.verify.isChecked()
         s.nas_verify_readback = self.nas_verify.isChecked()
@@ -296,14 +337,16 @@ class SettingsPage(QWidget):
         s.exclude_volumes = self._split(self.exclude.text())
         s.col_station = self.col_station.text().strip() or "Station"
         s.col_retrieval_sd = self.col_ret.text().strip() or "RetrievalSD"
+        s.col_installation_sd = self.col_inst.text().strip() or "InstallationSD"
         s.card_id_match_tail_number = self.tail_match.isChecked()
         s.station_prefix = self.station_prefix.text().strip()
         s.station_digits = int(self.station_digits.value())
-        s.convert_enabled = self.conv_enabled.isChecked()
         s.convert_extensions = [e.lstrip(".").lower() for e in self._split(self.conv_ext.text())] or ["avi"]
         s.convert_crf = int(self.conv_crf.value())
         s.convert_encoder = self.conv_encoder.currentData() or "auto"
         s.convert_parallel = int(self.conv_parallel.value())
         s.ffmpeg_path = self.ffmpeg_path.text()
+        if s.to_dict() == before:
+            return False
         self.ctx.save()
-        QMessageBox.information(self, "設定", "保存しました。同時コピー枚数の変更はアプリの再起動後に反映されます。")
+        return True

@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHBoxLayout, QLabel
 
 from ...core.volume_label import label_too_long, proposed_label, set_volume_label
 from ..context import AppContext
-from ..widgets import COLORS, make_table, set_row
+from ..widgets import COLORS, make_table, set_row, volume_sort_key
 
 
 class IdPage(QWidget):
@@ -47,7 +47,7 @@ class IdPage(QWidget):
         ops.addStretch(1)
         root.addLayout(ops)
 
-        self.table = make_table(["スロット", "ボリューム名", "現在のID", "状態", "付けるID（ここに入力）", "結果"])
+        self.table = make_table(["ドライブ", "ボリューム名", "現在のID", "状態", "付けるID（ここに入力）", "結果"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.AllEditTriggers)
         root.addWidget(self.table, 1)
         # 画面を開いている間は、カードの抜き差しに合わせて一覧を自動で更新する（入力途中の ID は残す）
@@ -91,7 +91,7 @@ class IdPage(QWidget):
             else:
                 state = "ID なし"
             rows.append((key, v, "", state))
-        rows.sort(key=lambda r: self.ctx.slot_sort_key(r[1]))
+        rows.sort(key=lambda r: volume_sort_key(r[1]))
         keys = tuple((k, cid, state) for k, _v, cid, state in rows)
         if auto and keys == self._keys:
             return
@@ -102,7 +102,7 @@ class IdPage(QWidget):
         for i, (key, v, cid, state) in enumerate(rows):
             color = COLORS["ok"] if cid else (COLORS["err"] if v.kind == "unreadable" else COLORS["warn"])
             prefill = "" if cid else edits.get(key, suggested.get(key, ""))
-            set_row(self.table, i, [self.ctx.slot_label(v), v.label, cid, state, prefill, ""], color)
+            set_row(self.table, i, [v.display, v.label, cid, state, prefill, ""], color)
             it = self.table.item(i, self.COL_INPUT)
             if cid or v.kind == "unreadable":
                 it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)

@@ -108,10 +108,63 @@ class Fieldnote:
         return [r for r in self.rows if all(_same_value(r.get(h), v) for h, v in resolved)]
 
 
+CSV_EXTS = (".csv", ".tsv", ".txt")
+
+
+def is_csv(path: str) -> bool:
+    return (path or "").lower().endswith(CSV_EXTS)
+
+
 def list_sheets(path: str) -> list[str]:
+    if is_csv(path):
+        return []
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
         return list(wb.sheetnames)
+    finally:
+        wb.close()
+
+
+def _read_csv_rows(path: str) -> list[list[Any]]:
+    """csv/tsv を読む。文字コードは UTF-8（BOM 可）→ Shift_JIS（Excel の CSV）の順に試す。"""
+    import csv
+    raw = open(path, "rb").read()
+    text = None
+    for enc in ("utf-8-sig", "cp932", "utf-8"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+    except csv.Error:
+        dialect = csv.excel_tab if path.lower().endswith(".tsv") else csv.excel
+    return [list(r) for r in csv.reader(text.splitlines(), dialect)]
+
+
+def _read_table(path: str, sheet: str | None) -> tuple[str, list[str], list[str], list[list[Any]]]:
+    """(シート名, シート一覧, 見出し, データ行) を返す。csv ならシートは無い。"""
+    if is_csv(path):
+        rows = _read_csv_rows(path)
+        if not rows:
+            raise ValueError("ファイルが空です")
+        return "", [], [_s(h) for h in rows[0]], rows[1:]
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheet_name = sheet or wb.sheetnames[0]
+        if sheet_name not in wb.sheetnames:
+            raise ValueError(f"シート '{sheet_name}' がありません。あるシート: {', '.join(wb.sheetnames)}")
+        ws = wb[sheet_name]
+        it = ws.iter_rows(values_only=True)
+        try:
+            header = [_s(h) for h in next(it)]
+        except StopIteration:
+            raise ValueError("シートが空です")
+        return sheet_name, list(wb.sheetnames), header, [list(r) for r in it]
     finally:
         wb.close()
 
@@ -140,49 +193,43 @@ def _resolve_columns(header: list[str], wanted: dict[str, str]) -> tuple[dict[st
     return idx, notes, missing
 
 
-def load_fieldnote(path: str, s: Settings, sheet: str | None = None) -> Fieldnote:
-    wb = load_workbook(path, read_only=True, data_only=True)
-    try:
-        sheet_name = sheet or s.fieldnote_sheet or wb.sheetnames[0]
-        if sheet_name not in wb.sheetnames:
-            raise ValueError(f"シート '{sheet_name}' がありません。あるシート: {', '.join(wb.sheetnames)}")
-        ws = wb[sheet_name]
-        it = ws.iter_rows(values_only=True)
-        try:
-            header = [_s(h) for h in next(it)]
-        except StopIteration:
-            raise ValueError("シートが空です")
-        # 必須は Station と 回収SD だけ。ほかの列（Season, Type など）は絞り込みに自由に使える
-        wanted = {"station": s.col_station, "retrieval": s.col_retrieval_sd}
-        idx, notes, missing = _resolve_columns(header, wanted)
-        if missing:
-            cols = ", ".join(h for h in header if h)
-            raise ValueError("野帳に列がありません: " + ", ".join(missing)
-                             + f"\n\nこのファイルの列: {cols}\n\n設定画面の「野帳の列名」をこのファイルに合わせてください。")
-        extra, _n, _m = _resolve_columns(header, {"date": "Date", "state": "State", "remarks": "Remarks"})
+def load_fieldnote(path: str, s: Settings, sheet: str | None = None, require_retrieval: bool = True) -> Fieldnote:
+    """野帳（Excel または csv）を読む。必須は地点名の列と、require_retrieval なら回収SDの列。
+    設置記録として読むときは require_retrieval=False（回収SD列が無くてもよい）。"""
+    sheet_name, sheets, header, data = _read_table(path, sheet or (s.fieldnote_sheet if require_retrieval else None) or None)
+    # 必須は Station と 回収SD だけ。ほかの列（Season, Type など）は絞り込みに自由に使える
+    wanted = {"station": s.col_station}
+    if require_retrieval:
+        wanted["retrieval"] = s.col_retrieval_sd
+    idx, notes, missing = _resolve_columns(header, wanted)
+    if missing:
+        cols = ", ".join(h for h in header if h)
+        raise ValueError("表に列がありません: " + ", ".join(missing)
+                         + f"\n\nこのファイルの列: {cols}\n\n設定画面の「野帳の列名」をこのファイルに合わせてください。")
+    if not require_retrieval:
+        more, _n, _m = _resolve_columns(header, {"retrieval": s.col_retrieval_sd})
+        idx.update(more)
+    extra, _n, _m = _resolve_columns(header, {"date": "Date", "state": "State", "remarks": "Remarks"})
 
-        def get(row: tuple, key: str, table: dict[str, int]) -> str:
-            i = table.get(key)
-            return _s(row[i]) if i is not None and i < len(row) else ""
+    def get(row: list, key: str, table: dict[str, int]) -> str:
+        i = table.get(key)
+        return _s(row[i]) if i is not None and i < len(row) else ""
 
-        rows: list[FieldnoteRow] = []
-        for n, row in enumerate(it, start=2):
-            if row is None or all(v is None for v in row):
-                continue
-            values = {h: _s(row[i]) if i < len(row) else "" for i, h in enumerate(header) if h}
-            rows.append(FieldnoteRow(
-                row_no=n,
-                station=get(row, "station", idx),
-                retrieval_sd=get(row, "retrieval", idx),
-                values=values,
-                date=get(row, "date", extra),
-                state=get(row, "state", extra),
-                remarks=get(row, "remarks", extra),
-            ))
-        return Fieldnote(path=path, sheet=sheet_name, sheets=list(wb.sheetnames), header=header, rows=rows,
-                         notes=notes)
-    finally:
-        wb.close()
+    rows: list[FieldnoteRow] = []
+    for n, row in enumerate(data, start=2):
+        if row is None or all(v is None or _s(v) == "" for v in row):
+            continue
+        values = {h: _s(row[i]) if i < len(row) else "" for i, h in enumerate(header) if h}
+        rows.append(FieldnoteRow(
+            row_no=n,
+            station=get(row, "station", idx),
+            retrieval_sd=get(row, "retrieval", idx),
+            values=values,
+            date=get(row, "date", extra),
+            state=get(row, "state", extra),
+            remarks=get(row, "remarks", extra),
+        ))
+    return Fieldnote(path=path, sheet=sheet_name, sheets=sheets, header=header, rows=rows, notes=notes)
 
 
 # ----------------------------------------------------------------------------
@@ -298,3 +345,81 @@ def build_mapping(fn: Fieldnote, conditions: list[Condition], s: Settings, seaso
                 x.errors.append(f"地点 {st} が{len(es)}行にあります")
             issues.append(f"地点 {st} が複数行にあります（行 {', '.join(str(x.row_no) for x in es)}）")
     return Mapping(conditions, season_folder, entries, issues)
+
+
+# ----------------------------------------------------------------------------
+# 設置記録との照合
+# ----------------------------------------------------------------------------
+
+@dataclass
+class InstallCheck:
+    """設置時の記録（地点名・設置SD）と、回収時の記録（地点名・回収SD）の突き合わせの結果。"""
+    n_install_rows: int = 0     # 使った設置記録の行数
+    n_checked: int = 0          # 設置記録に同じ地点があって照合できた回収行
+    n_match: int = 0
+    n_mismatch: int = 0         # 設置SDと回収SDが違う（カード番号か地点名の書き間違いの疑い）
+    n_no_record: int = 0        # 回収行の地点が設置記録に無い
+    issues: list[str] = field(default_factory=list)   # 設置記録にあるのに回収行が無い地点など
+
+    @property
+    def summary(self) -> str:
+        return (f"設置記録 {self.n_install_rows} 行と照合: 一致 {self.n_match} / 不一致 {self.n_mismatch}"
+                f" / 設置記録に無い地点 {self.n_no_record}")
+
+
+def cross_check_installation(mapping: Mapping, install_fn: Fieldnote, conditions: list[Condition], s: Settings) -> InstallCheck:
+    """対応表の各行（地点 → 回収SD）が、設置記録（地点 → 設置SD）と合うか確かめ、合わない行に注意を付ける。
+    設置記録にあるのに回収行が無い地点は issues に挙げる。結果は mapping.issues にも追記する。"""
+    res = InstallCheck()
+    conditions = [(c, v) for c, v in conditions if (c or "").strip()]
+    col = install_fn.resolve_column(s.col_installation_sd)
+    if col is None:
+        res.issues.append(f"設置記録に列 '{s.col_installation_sd}' がありません（列: {', '.join(install_fn.columns)}）。"
+                          "設定の「設置したカードIDの列」を確かめてください")
+        mapping.issues += res.issues
+        return res
+    for c, _v in conditions:
+        if install_fn.resolve_column(c) is None:
+            res.issues.append(f"設置記録に列 '{c}' がありません（列: {', '.join(install_fn.columns)}）")
+            mapping.issues += res.issues
+            return res
+    rows = install_fn.filter(conditions)
+    res.n_install_rows = len(rows)
+    if not rows:
+        cond = "、".join(f"{c} = {v if v else '（空）'}" for c, v in conditions) or "（絞り込みなし）"
+        res.issues.append(f"設置記録に条件に合う行がありません: {cond}")
+        mapping.issues += res.issues
+        return res
+    by_station: dict[str, list[tuple[str, int]]] = {}
+    for r in rows:
+        st = format_station(r.station, s.station_prefix, s.station_digits)
+        if st:
+            by_station.setdefault(st, []).append((r.get(col), r.row_no))
+    for e in mapping.entries:
+        if not e.station_folder:
+            continue
+        recs = by_station.get(e.station_folder)
+        if not recs:
+            res.n_no_record += 1
+            e.warnings.append("設置記録にこの地点がありません")
+            continue
+        res.n_checked += 1
+        sds = {normalize_card_id(sd): sd for sd, _n in recs if sd}
+        rows_txt = ", ".join(str(n) for _sd, n in recs)
+        if not sds:
+            e.warnings.append(f"設置記録の設置SDが空です（行 {rows_txt}）")
+        elif e.card_id_norm in sds:
+            res.n_match += 1
+        else:
+            res.n_mismatch += 1
+            e.warnings.append(f"設置記録では SD {' / '.join(sds.values())} を設置（行 {rows_txt}）。"
+                              f"回収SD {e.card_id} と一致しません。カード番号か地点名の書き間違いを確かめてください")
+    mapped = {e.station_folder for e in mapping.entries}
+    for st in sorted(by_station):
+        if st not in mapped:
+            sds = ", ".join(sd or "（空）" for sd, _n in by_station[st])
+            res.issues.append(f"設置記録の地点 {st}（設置SD {sds}）に対応する回収行がありません（未回収、または地点名の書き間違い）")
+    if res.n_mismatch:
+        res.issues.insert(0, f"設置記録と回収SDが一致しない行が {res.n_mismatch} 件あります（表の注意を確認）")
+    mapping.issues += res.issues
+    return res

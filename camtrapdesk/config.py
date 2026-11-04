@@ -62,21 +62,29 @@ class Settings:
     ffmpeg_path: str = ""            # 空なら自動（アプリ同梱 → imageio-ffmpeg → PATH）
     batch_convert_in_place: bool = True   # 「動画を mp4 に変換」: 同じ場所に置き換える（False なら別フォルダへ保存して元を残す）
     batch_convert_out_root: str = ""      # 別フォルダへ保存するときの保存先
+    # --- 壊れたファイル（電圧低下などで途中までしか書けなかった動画。Windows の「スキャンして修復」が出るカード） ---
+    broken_check: bool = True            # コピー後に中継の上で動画・画像が壊れていないか調べる
+    broken_action: str = "delete"        # delete: 中継から消す / keep: カードフォルダ内の _破損 に移して残す（NAS には送らない）
     # --- 野帳 ---
     fieldnote_path: str = field(default_factory=_default_fieldnote_path)
     fieldnote_sheet: str = ""      # 空なら最初のシート
     col_station: str = "Station"           # 地点名の列
     col_retrieval_sd: str = "RetrievalSD"  # 回収したカードの ID の列
+    col_installation_sd: str = "InstallationSD"   # 設置したカードの ID の列（設置記録との照合に使う。任意）
     card_id_match_tail_number: bool = True   # id.txt の "6_650" と野帳の 650 を同一視する
     # 地点名（フォルダ名）の付け方: 接頭辞＋番号をゼロ埋め。例: BSN + 4桁 → 482 → BSN0482。接頭辞が空なら数字だけ（0482）
     station_prefix: str = "BSN"
     station_digits: int = 4                  # 0 ならゼロ埋めしない
     rename_filters: list[list[str]] = field(default_factory=list)   # 「地点名に変更」で前回使った絞り込み [[列, 値], ...]
+    # 設置記録との照合（任意）: 設置時の表（csv / Excel。野帳と同じファイルでもよい）の 地点名・設置SD と、回収SD が合うか確かめる
+    install_check: bool = False
+    install_path: str = ""                 # 空なら野帳と同じファイル
+    install_sheet: str = ""
+    install_filters: list[list[str]] = field(default_factory=list)   # 設置記録の行の絞り込み（例: [["Season", "260410"]]）
     # --- ボリューム検出 ---
     scan_roots: list[str] = field(default_factory=list)   # 追加の検索ルート（テスト・Linux用）
     exclude_volumes: list[str] = field(default_factory=list)
     volume_label_prefix: str = ""
-    slot_names: dict[str, str] = field(default_factory=dict)   # ボリューム識別子（リーダーのスロット）→ 人が付けた名前
 
     # ------------------------------------------------------------------
     def to_dict(self) -> dict[str, Any]:

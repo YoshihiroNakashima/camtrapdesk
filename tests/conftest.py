@@ -12,6 +12,9 @@ def nakashima_settings(**kw) -> Settings:
     kw.setdefault("station_prefix", "BSN")
     kw.setdefault("station_digits", 4)
     kw.setdefault("min_free_gb", 0)    # CI の実行環境は空きが小さいことがあるので、テストでは空き待ちにしない
+    # make_card が作る .MP4 は中身がでたらめ（本物の mp4 の構造ではない）ので、壊れたファイルの検出は既定で切る。
+    # 検出そのものは test_broken_* で本物の動画を使って確かめる
+    kw.setdefault("broken_check", False)
     return Settings(**kw)
 
 

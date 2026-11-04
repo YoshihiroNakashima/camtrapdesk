@@ -101,13 +101,11 @@ class IngestManager:
     def __init__(self, get_settings: Callable[[], Settings], ledger: L.Ledger,
                  on_update: Callable[[CardJob], None], on_log: Callable[[str], None],
                  on_batch_done: Callable[[int], None] | None = None,
-                 reader_group: Callable[[Volume], str] | None = None,
                  armed: bool = False):
         self.get_settings = get_settings
         # armed: 「取り込みを開始」で保存先などを確認してもらってから、挿したカードを自動で始める。
         # 起動直後は False で、検出したカードは「開始待ち」で止まる（設定が違うまま勝手にコピーしないため）
         self.armed = armed
-        self.reader_group = reader_group   # ボリューム → リーダーの識別（同じリーダーに並列が偏らないように順番を組む）
         self.ledger = ledger
         self.on_update = on_update
         self.on_log = on_log
@@ -269,7 +267,7 @@ class IngestManager:
                     job.message = "注意: " + "; ".join(c.warnings)
                 self.jobs[c.volume.key] = job
                 new_jobs.append(job)
-        for job in self._interleave(new_jobs):
+        for job in new_jobs:
             self.on_update(job)
             if job.state == S_ERROR:
                 self.on_log(f"[{job.card.card_id}] {job.message}")
@@ -280,26 +278,6 @@ class IngestManager:
                 self.on_update(job)
                 self.on_log(f"[{job.card.card_id}] 検出（{job.card.n_files}ファイル, {job.card.total_bytes/1e9:.2f} GB）。開始待ち")
         self._check_batch_done()
-
-    def _interleave(self, jobs: list[CardJob]) -> list[CardJob]:
-        """同じリーダーのカードが連続しないように、リーダーごとに順番に1枚ずつ取り出して並べる。
-        安価な多スロットリーダーは1台あたりの合計速度に上限があるため、並列コピーが1台に偏ると遅くなる。"""
-        if not self.reader_group or len(jobs) < 2:
-            return jobs
-        groups: dict[str, list[CardJob]] = {}
-        order: list[str] = []
-        for j in jobs:
-            g = self.reader_group(j.card.volume) or ""
-            if g not in groups:
-                groups[g] = []
-                order.append(g)
-            groups[g].append(j)
-        out: list[CardJob] = []
-        while any(groups.values()):
-            for g in order:
-                if groups[g]:
-                    out.append(groups[g].pop(0))
-        return out
 
     def _check_batch_done(self) -> None:
         with self._lock:
@@ -338,7 +316,7 @@ class IngestManager:
                         self.ledger.update_ingest(job.ingest_id, status=L.STATUS_ERROR, message=str(e),
                                                   finished_at=L.now_iso())
                     self.ledger.event("no_space", f"{job.card.card_id}: {e}", job.card.card_id)
-                    self.on_log(f"[{job.card.card_id}] {e}。NAS転送で空くか、「設定」で別のSSDを中継先にすると続きから再開します")
+                    self.on_log(f"[{job.card.card_id}] {e}。NAS転送で空くか、取り込み画面の保存先を別のSSDにすると続きから再開します")
                     job.ingest_id = None
                     job.done_bytes = 0
                     job.done_files = 0
@@ -379,12 +357,12 @@ class IngestManager:
                     break
                 job.state = S_WAITING
                 if free is None:
-                    job.message = (f"中継先 {s.dest_root} が見つかりません（取り外し中？）。"
-                                   "接続し直すか、「設定」で別の中継先を指定すると再開します")
+                    job.message = (f"保存先 {s.dest_root} が見つかりません（取り外し中？）。"
+                                   "接続し直すか、取り込み画面の保存先を別の場所にすると再開します")
                 else:
-                    job.message = (f"中継の空き待ち（空き {_gb(free)}、他のコピーで {_gb(reserved)} 使用予定、"
+                    job.message = (f"保存先の空き待ち（空き {_gb(free)}、他のコピーで {_gb(reserved)} 使用予定、"
                                    f"このカード {_gb(need_bytes)}＋余裕 {_gb(margin)}）。"
-                                   "NAS転送で空くか、「設定」で別のSSDを中継先にすると再開します")
+                                   "NAS転送で空くか、取り込み画面の保存先を別のSSDにすると再開します")
             self.on_update(job)
             if not waited:
                 waited = True
@@ -401,7 +379,7 @@ class IngestManager:
         card = job.card
         cid = card.card_id
         if not s.dest_root:
-            self._set(job, S_ERROR, "保存先（中継先）が未設定です。「設定」で指定してください")
+            self._set(job, S_ERROR, "保存先が未設定です。取り込み画面の上の欄で指定してください")
             return
         if card.problems:
             self._set(job, S_ERROR, "; ".join(card.problems))
@@ -479,6 +457,7 @@ class IngestManager:
 
         base_done = 0
         job.copy_started = time.time()
+        broken: list[tuple[str, str]] = []   # (ファイル名, 理由)。カードから読めなかったもの
         for i, f in enumerate(card.files, 1):
             if self._stop.is_set():
                 raise RuntimeError("停止されました")
@@ -502,7 +481,18 @@ class IngestManager:
                 nbytes, h = copy_with_hash(f.src_path, dst, prog)
             except OSError as e:
                 if e.errno == errno.ENOSPC:
-                    raise NoSpaceError("中継がいっぱいになりました") from e
+                    raise NoSpaceError("保存先がいっぱいになりました") from e
+                if s.broken_check and _is_source_read_error(e, f.src_path):
+                    # カード上で壊れていて読めないファイル: このファイルだけ諦めて先へ進む（カード全体は止めない）
+                    _remove_quietly(dst + ".part")
+                    reason = f"カードから読めません（{e.strerror or e}）"
+                    broken.append((f.name, reason))
+                    self.ledger.set_file_broken(ingest_id, f.name, reason)
+                    self.on_log(f"[{cid}] {f.name}: {reason}。飛ばして続けます")
+                    base_done += f.size
+                    job.done_bytes = base_done
+                    job.done_files = i
+                    continue
                 raise RuntimeError(f"{f.name} のコピーに失敗: {e}") from e
             if nbytes != f.size:
                 raise RuntimeError(f"{f.name}: サイズ不一致（元 {f.size} / コピー {nbytes}）")
@@ -519,21 +509,81 @@ class IngestManager:
             job.done_files = i
             self._set(job, S_COPYING, f"コピー中 {i}/{card.n_files}")
 
+        # 壊れたファイル（途中までしか書けなかった動画など）を中継の上で調べ、取り除く
+        if s.broken_check:
+            self._set(job, S_VERIFYING, "壊れたファイルがないか確認中")
+            broken += self._remove_broken(ingest_id, dest_dir, card, s, skip={n for n, _r in broken})
+
         ts = L.now_iso()
+        broken_names = {n for n, _r in broken}
+        good_files = [f for f in card.files if f.name not in broken_names]
         # 変換（AVI → mp4）が有効なら、対象ファイル数を記録しておく。NAS 転送は変換が終わってから
         n_convert = 0
         if s.convert_enabled:
             exts = {e.lower().lstrip(".") for e in s.convert_extensions}
-            n_convert = sum(1 for f in card.files if ("." in f.name and f.name.rsplit(".", 1)[-1].lower() in exts))
+            n_convert = sum(1 for f in good_files if ("." in f.name and f.name.rsplit(".", 1)[-1].lower() in exts))
         self.ledger.update_ingest(ingest_id, status=L.STATUS_STAGED, finished_at=ts, staging_verified_at=ts,
-                                  message="中継先で検証済み", convert_pending=n_convert)
+                                  message="中継先で検証済み" + (f"（壊れた {len(broken)} ファイルを除く）" if broken else ""),
+                                  convert_pending=n_convert)
         self.ledger.write_manifest(ingest_id, dest_dir)
-        self.ledger.event("ingest_done", f"{season_folder}/{dir_name}", cid)
+        self.ledger.event("ingest_done", f"{season_folder}/{dir_name}" + (f", {len(broken)} broken" if broken else ""), cid)
         notes = []
         if n_convert:
             notes.append(f"mp4 への変換（{n_convert}ファイル）")
         if s.nas_root:
             notes.append("NASへの転送")
         nas_note = "。" + "と".join(notes) + "はバックグラウンドで続きます" if notes else ""
-        self._set(job, S_DONE, f"完了: {card.n_files}ファイル検証済み{nas_note}")
-        self.on_log(f"[{cid}] 完了（{card.n_files}ファイル, {card.total_bytes/1e9:.2f} GB）")
+        broken_note = ""
+        if broken:
+            where = "中継から消しました" if s.broken_action != "keep" else "_破損 フォルダに移しました"
+            broken_note = f"。壊れていた {len(broken)} ファイルは{where}（カードを消すときに一緒に消えます）"
+        self._set(job, S_DONE, f"完了: {len(good_files)}ファイル検証済み{broken_note}{nas_note}")
+        self.on_log(f"[{cid}] 完了（{len(good_files)}ファイル, {card.total_bytes/1e9:.2f} GB"
+                    + (f"、壊れたファイル {len(broken)} 件" if broken else "") + "）")
+
+    def _remove_broken(self, ingest_id: int, dest_dir: str, card: Card, s: Settings,
+                       skip: set[str]) -> list[tuple[str, str]]:
+        """中継にコピーしたファイルのうち壊れているものを見つけ、設定に従って消すか _破損 に移す。戻り値は (名前, 理由)。"""
+        from .ffmpeg import find_ffmpeg
+        from .mediacheck import BROKEN_DIR, check_media_file, is_checkable
+        ffmpeg = find_ffmpeg(s.ffmpeg_path)
+        out: list[tuple[str, str]] = []
+        for f in card.files:
+            if f.name in skip or not is_checkable(f.name):
+                continue
+            p = os.path.join(dest_dir, f.name)
+            reason = check_media_file(p, ffmpeg)
+            if not reason:
+                continue
+            if s.broken_action == "keep":
+                bdir = os.path.join(dest_dir, BROKEN_DIR)
+                try:
+                    os.makedirs(bdir, exist_ok=True)
+                    os.replace(p, os.path.join(bdir, f.name))
+                except OSError as e:
+                    self.on_log(f"[{card.card_id}] {f.name} を {BROKEN_DIR} に移せません: {e}")
+                    continue
+            else:
+                _remove_quietly(p)
+            self.ledger.set_file_broken(ingest_id, f.name, reason)
+            self.on_log(f"[{card.card_id}] 壊れたファイル: {f.name}（{reason}）")
+            out.append((f.name, reason))
+        if out:
+            self.ledger.event("broken", f"{card.card_id}: " + ", ".join(n for n, _r in out), card.card_id)
+        return out
+
+
+def _is_source_read_error(e: OSError, src_path: str) -> bool:
+    """コピー中の OSError が、カード側（読み取り）で起きたものか。"""
+    fn = getattr(e, "filename", None) or ""
+    if fn and os.path.normcase(os.path.abspath(fn)) == os.path.normcase(os.path.abspath(src_path)):
+        return True
+    win = getattr(e, "winerror", None)
+    return e.errno == errno.EIO or win in (23, 1117, 1392)   # Windows: CRC エラー / I/O デバイスエラー / 破損
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass

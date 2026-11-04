@@ -103,7 +103,7 @@ class NasSyncer:
         if not src_dir or not os.path.isdir(src_dir):
             self.on_log(f"[{ing.card_id}] 中継先フォルダが見つかりません（取り外し中？）。接続されたら転送します: {ing.staging_dir}")
             return
-        files = [f for f in self.ledger.files_for(ing.id) if not f.deleted_at]
+        files = self.ledger.usable_files_for(ing.id)
         total = sum(f.size for f in files) or 1
         os.makedirs(dst_dir, exist_ok=True)
         done = 0
@@ -181,7 +181,7 @@ class NasSyncer:
                 self.ledger.update_ingest(ing.id, staging_cleared_at=L.now_iso())
                 continue
             # NAS 側に実体があることをサイズで確かめてから消す（台帳だけを信じない）
-            files = [f for f in self.ledger.files_for(ing.id) if not f.deleted_at]
+            files = self.ledger.usable_files_for(ing.id)
             if not os.path.isdir(dst_dir):
                 continue
             ok = all(os.path.isfile(os.path.join(dst_dir, f.name)) and os.path.getsize(os.path.join(dst_dir, f.name)) == f.size

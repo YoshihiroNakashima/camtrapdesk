@@ -109,7 +109,7 @@ class Converter:
         exts = {e.lower().lstrip(".") for e in s.convert_extensions}
         out = []
         for f in self.ledger.files_for(ing.id):
-            if f.converted or f.deleted_at or (ing.id, f.name) in self._failed:
+            if f.converted or f.deleted_at or f.broken or (ing.id, f.name) in self._failed:
                 continue
             ext = f.name.rsplit(".", 1)[-1].lower() if "." in f.name else ""
             if ext in exts:

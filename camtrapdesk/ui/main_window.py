@@ -16,7 +16,6 @@ from .pages.ingest_page import IngestPage
 from .pages.ledger_page import LedgerPage
 from .pages.rename_page import RenamePage
 from .pages.settings_page import SettingsPage
-from .pages.slot_page import SlotPage
 
 
 def _app_icon() -> QIcon:
@@ -56,12 +55,10 @@ class MainWindow(QMainWindow):
 
         self._add_header("最初に一度だけ")
         self._add_page("カードにIDを付ける", IdPage(ctx), "新しいSDカードに番号（id.txt）を書き込みます")
-        self._add_header("リーダーを挿し替えたら")
-        self._add_page("スロットに名前を付ける", SlotPage(ctx), "リーダーの差し口に名前を付けて、ドライブ文字に頼らず見分けます")
         self._add_header("移行のたびに（この順で）")
-        self._add_page("1. 取り込み", IngestPage(ctx), "挿したカードを保存先にコピーして検証し、NASへ転送します")
+        self._add_page("1. 取り込み", IngestPage(ctx), "保存先を指定し、挿したカードをコピーして検証し、NASへ転送します")
         self._add_page("2. 地点名に変更", RenamePage(ctx), "野帳の回収SD列をもとに、カードIDのフォルダ名を地点名にします")
-        self._add_page("3. カードを消す", ClearPage(ctx), "保存先（NAS）と照合できたカードの動画だけを削除します")
+        self._add_page("3. カードを消す", ClearPage(ctx), "保存先（NAS）と照合できたカードの動画だけを削除し、消し忘れたカードが無いか確かめます")
         self._add_header("保存済みのデータ（任意）")
         self._add_page("動画を mp4 に変換", BatchConvertPage(ctx), "NAS や中継にすでにあるフォルダの AVI を後から mp4 に変換して容量を減らします")
         self._add_header("記録・設定")

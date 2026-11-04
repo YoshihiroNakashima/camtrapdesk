@@ -35,8 +35,7 @@ class AppContext(QObject):
         self.ingest = IngestManager(self.get_settings, self.ledger,
                                     on_update=self.job_updated.emit,
                                     on_log=self.log_message.emit,
-                                    on_batch_done=self.ingest_batch_done.emit,
-                                    reader_group=self.reader_group)
+                                    on_batch_done=self.ingest_batch_done.emit)
         self.nas = NasSyncer(self.get_settings, self.ledger,
                              on_status=self.nas_status.emit,
                              on_log=self.log_message.emit,
@@ -56,7 +55,8 @@ class AppContext(QObject):
 
     def _destination_signature(self) -> tuple:
         s = self.settings
-        return (s.dest_root, s.nas_root, s.season_folder.strip(), s.convert_enabled, tuple(s.media_subdirs))
+        return (s.dest_root, s.nas_root, s.season_folder.strip(), s.convert_enabled, tuple(s.media_subdirs),
+                s.broken_check, s.broken_action)
 
     def _maybe_wake_nas(self, job: CardJob) -> None:
         from ..core.ingest import S_DONE
@@ -67,27 +67,8 @@ class AppContext(QObject):
     def get_settings(self) -> Settings:
         return self.settings
 
-    def slot_label(self, volume) -> str:
-        """スロットに名前が付いていれば「名前 (K:)」、無ければドライブ表示だけ。"""
-        name = self.settings.slot_names.get(volume.key)
-        return f"{name} ({volume.display})" if name else volume.display
-
-    def reader_group(self, volume) -> str:
-        """スロット名「U1-3-B」の最後の区切りより前（U1-3）をリーダーの識別として使う。名前が無ければ空。"""
-        import re
-        name = self.settings.slot_names.get(volume.key, "")
-        if not name:
-            return ""
-        parts = re.split(r"[-_/ ]", name)
-        return "-".join(parts[:-1]) if len(parts) > 1 else name
-
-    def slot_sort_key(self, volume) -> tuple:
-        import re
-        name = self.settings.slot_names.get(volume.key, "")
-        parts = [(0, int(x)) if x.isdigit() else (1, x.lower()) for x in re.split(r"(\d+)", name) if x]
-        return (0 if name else 1, parts, volume.display)
-
     def save(self) -> None:
+        """設定をすぐファイルに書く（各画面は値を変えたらそのまま呼ぶ。「保存」ボタンは無い）。"""
         save_settings(self.settings)
         self._apply_match_mode()
         self.converter.encoder = None   # エンコーダの指定が変わったかもしれないので選び直す
@@ -98,7 +79,7 @@ class AppContext(QObject):
             if self.ingest.armed:
                 # 保存先やフォルダ名が変わったら、確認してもらうまで新しいカードを自動で始めない
                 self.ingest.disarm()
-                self.log_message.emit("保存先・フォルダ名などの設定が変わったので、新しいカードの自動開始を止めました。内容を確認して「取り込みを開始」を押してください")
+                self.log_message.emit("保存先・フォルダ名などが変わったので、新しいカードの自動開始を止めました。内容を確認して「取り込みを開始」を押してください")
         self.settings_changed.emit()
 
     def _apply_match_mode(self) -> None:

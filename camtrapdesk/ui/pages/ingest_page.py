@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QFormLayout, QGroupBox, QHBoxLayout, Q
 
 from ...core import ingest as I
 from ..context import AppContext
-from ..widgets import COLORS, human_size, make_table, set_row
+from ..widgets import COLORS, PathRow, human_size, make_table, set_row, volume_sort_key
 
 
 class IngestPage(QWidget):
@@ -25,17 +25,28 @@ class IngestPage(QWidget):
 
         root = QVBoxLayout(self)
 
-        # --- 上段: 設定の要点 ---
-        box = QGroupBox("取り込み先")
+        # --- 上段: 保存先（ここで指定する。変えたらすぐ保存され、「保存」ボタンは無い） ---
+        box = QGroupBox("保存先（ここで指定します。変更はすぐ反映されます）")
         form = QFormLayout(box)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        hd = QHBoxLayout()
+        self.dest_row = PathRow(s.dest_root, "dir", placeholder=r"例: D:\CamTrap（中継の SSD/HDD。NAS を直接指定してもよい）")
+        self.dest_row.changed.connect(self._dest_changed)
+        self.dest_label = QLabel()
+        hd.addWidget(self.dest_row, 1)
+        hd.addWidget(self.dest_label)
+        form.addRow("保存先（中継）", hd)
+        self.nas_row = PathRow(s.nas_root, "dir", placeholder=r"例: \\DS2422\camtrap　空なら NAS 転送なし（上の保存先が最終保存先）")
+        self.nas_row.changed.connect(self._nas_changed)
+        form.addRow("NAS の最終保存先（任意）", self.nas_row)
         self.season_edit = QLineEdit(s.season_folder)
         self.season_edit.setPlaceholderText("任意。同じ調査を繰り返すなら調査回ごと（例: N260710）、一度きりなら調査地名（例: 保尊崎）。空なら保存先の直下")
         self.season_edit.editingFinished.connect(self._season_changed)
         form.addRow("取り込み先のフォルダ名（調査の区切り）", self.season_edit)
-        self.dest_label = QLabel()
-        form.addRow("保存先（中継）", self.dest_label)
-        self.nas_label = QLabel()
-        form.addRow("NAS", self.nas_label)
+        self.convert_chk = QCheckBox("AVI などを H.264 の mp4 に変換してから NAS へ送る（画質やエンコーダは「設定」）")
+        self.convert_chk.setChecked(s.convert_enabled)
+        self.convert_chk.toggled.connect(self._convert_toggled)
+        form.addRow("動画の変換", self.convert_chk)
         root.addWidget(box)
 
         # --- 操作 ---
@@ -61,7 +72,7 @@ class IngestPage(QWidget):
 
         # --- 表とログ ---
         split = QSplitter(Qt.Orientation.Vertical)
-        self.table = make_table(["スロット", "カードID", "ファイル数", "容量", "状態", "進捗", "メッセージ"])
+        self.table = make_table(["ドライブ", "カードID", "ファイル数", "容量", "状態", "進捗", "メッセージ"])
         split.addWidget(self.table)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -115,19 +126,57 @@ class IngestPage(QWidget):
     # ------------------------------------------------------------------ slots
     def _refresh_labels(self) -> None:
         s = self.ctx.settings
-        dest = s.dest_root or "（未設定。「設定」で保存先を指定してください）"
-        free = I.free_bytes(s.dest_root) if s.dest_root else None
-        if free is not None:
-            dest += f"　空き {human_size(free)}"
-            if s.nas_root and s.staging_cleanup_after_nas:
-                dest += "（NASで検証済みの分は自動で消して空けます）"
-        elif s.dest_root:
-            dest += "　（見つかりません。取り外し中？）"
-        dest += "　※変更は「設定」で（いっぱいになったら別のSSDを繋いで設定を変えると続きから取り込みます）"
-        self.dest_label.setText(dest)
-        self.nas_label.setText(s.nas_root or "（NAS転送なし。保存先が最終保存先になります）")
+        if self.dest_row.text() != s.dest_root:
+            self.dest_row.setText(s.dest_root)
+        if self.nas_row.text() != s.nas_root:
+            self.nas_row.setText(s.nas_root)
+        if self.convert_chk.isChecked() != s.convert_enabled:
+            self.convert_chk.blockSignals(True)
+            self.convert_chk.setChecked(s.convert_enabled)
+            self.convert_chk.blockSignals(False)
+        if not s.dest_root:
+            text, style = "← 未設定。ここで指定してください", "color: #b00;"
+        else:
+            free = I.free_bytes(s.dest_root)
+            if free is not None:
+                text, style = f"空き {human_size(free)}", ""
+                if s.nas_root and s.staging_cleanup_after_nas:
+                    text += "（NASで検証済みの分は自動で消して空けます）"
+            else:
+                text, style = "見つかりません（取り外し中？）", "color: #b00;"
+        self.dest_label.setText(text)
+        self.dest_label.setStyleSheet(style)
+        self.dest_label.setToolTip("いっぱいになったら別の SSD を繋いでここを変えると、続きからそちらへ取り込みます")
         if self.season_edit.text() != s.season_folder:
             self.season_edit.setText(s.season_folder)
+
+    def _dest_changed(self, path: str) -> None:
+        s = self.ctx.settings
+        if path and not os.path.isdir(path):
+            QMessageBox.warning(self, "保存先", f"フォルダが見つかりません:\n{path}\n\n接続を確認するか、「参照…」で選び直してください。")
+        if path != s.dest_root:
+            s.dest_root = path
+            self.ctx.save()
+            self._append_log(f"保存先を {path or '（未設定）'} にしました")
+        self._ensure_season_dir()
+        self._refresh_labels()
+
+    def _nas_changed(self, path: str) -> None:
+        s = self.ctx.settings
+        if path and not os.path.isdir(path):
+            QMessageBox.warning(self, "NAS", f"フォルダが見つかりません:\n{path}\n\nNAS に接続されているか確認してください（取り込みは続けられます。転送は接続されてから始まります）。")
+        if path != s.nas_root:
+            s.nas_root = path
+            self.ctx.save()
+            self._append_log(f"NAS の最終保存先を {path or '（なし）'} にしました")
+        self._refresh_labels()
+
+    def _convert_toggled(self, on: bool) -> None:
+        s = self.ctx.settings
+        if on != s.convert_enabled:
+            s.convert_enabled = on
+            self.ctx.save()
+            self._append_log("動画の変換を" + ("オンにしました（中継の上で mp4 にしてから NAS へ送ります）" if on else "オフにしました"))
 
     def _season_changed(self) -> None:
         v = self.season_edit.text().strip()
@@ -154,7 +203,11 @@ class IngestPage(QWidget):
             return
         s = self.ctx.settings
         if not s.dest_root:
-            QMessageBox.warning(self, "取り込みを開始", "保存先（中継先）が未設定です。「設定」で指定してください。")
+            QMessageBox.warning(self, "取り込みを開始", "保存先が未設定です。この画面の上の「保存先（中継）」で指定してください。")
+            self.dest_row.edit.setFocus()
+            return
+        if not os.path.isdir(s.dest_root):
+            QMessageBox.warning(self, "取り込みを開始", f"保存先が見つかりません:\n{s.dest_root}\n\n接続を確認するか、別の場所を指定してください。")
             return
         free = I.free_bytes(s.dest_root) if s.dest_root else None
         waiting = [j for j in ing.jobs.values() if j.state == I.S_DETECTED and not j.card.problems]
@@ -256,8 +309,8 @@ class IngestPage(QWidget):
         if not self._dirty:
             return
         self._dirty = False
-        jobs = sorted(self.ctx.ingest.jobs.values(), key=lambda j: self.ctx.slot_sort_key(j.card.volume))
-        others = sorted(self.ctx.ingest.others.values(), key=lambda o: self.ctx.slot_sort_key(o[0]))
+        jobs = sorted(self.ctx.ingest.jobs.values(), key=lambda j: volume_sort_key(j.card.volume))
+        others = sorted(self.ctx.ingest.others.values(), key=lambda o: volume_sort_key(o[0]))
         self.table.setRowCount(len(jobs) + len(others))
         n_done = n_active = n_err = 0
         for r, job in enumerate(jobs):
@@ -269,7 +322,7 @@ class IngestPage(QWidget):
             spd = job.speed_mbps
             if prog and spd:
                 prog += f" ({spd:.0f} MB/s)"
-            set_row(self.table, r, [self.ctx.slot_label(job.card.volume), job.card.card_id, str(job.card.n_files),
+            set_row(self.table, r, [job.card.volume.display, job.card.card_id, str(job.card.n_files),
                                     human_size(job.card.total_bytes), I.STATE_LABELS.get(st, st), prog, job.message],
                     color)
             if st == I.S_DONE:
@@ -288,7 +341,7 @@ class IngestPage(QWidget):
                 state, color = "IDなし", COLORS["warn"]
                 n_noid += 1
                 reason = reason + "。左の「カードにIDを付ける」で番号を付けてください"
-            set_row(self.table, r, [self.ctx.slot_label(v), "", "", "", state, "", f"{v.label}: {reason}"], color)
+            set_row(self.table, r, [v.display, "", "", "", state, "", f"{v.label}: {reason}"], color)
         extra = ""
         if n_noid:
             extra += f" / IDなし {n_noid}"

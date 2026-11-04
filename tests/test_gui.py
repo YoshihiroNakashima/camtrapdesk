@@ -51,7 +51,6 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
     from camtrapdesk.ui.pages.ledger_page import LedgerPage
     from camtrapdesk.ui.pages.rename_page import RenamePage
     from camtrapdesk.ui.pages.settings_page import SettingsPage
-    from camtrapdesk.ui.pages.slot_page import SlotPage
     ctx = AppContext()
     win = MainWindow(ctx)
     win.show()
@@ -76,6 +75,7 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
     assert all(j.state == I.S_DONE for j in ctx.ingest.jobs.values())
     _pump(app, 0.8)   # 表の更新タイマー（0.5秒）を待つ
     assert ingest_page.table.rowCount() == 2
+    assert ingest_page.dest_row.text() == str(dest) and "空き" in ingest_page.dest_label.text()
     # NAS 転送が終わるまで
     for _ in range(100):
         _pump(app, 0.2)
@@ -102,23 +102,39 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
     assert (dest / "N260710" / "BSN0735").is_dir() and (nas / "N260710" / "BSN0735").is_dir()
     win.grab().save(str(tmp_path / "rename.png"))
 
-    # 削除
+    # 削除: 画面を開くと挿さっているカードを自動で照合し、1 ボタンで消せる分を消す
     clear_page = win.page(ClearPage)
     win.show_page(ClearPage)
-    clear_page.check()
-    assert all(v.ok for v in clear_page.verdicts)
-    clear_page.delete()
+    for _ in range(100):
+        _pump(app, 0.1)
+        if len(clear_page.verdicts) == 2 and not clear_page._checking:
+            break
+    assert len(clear_page.verdicts) == 2 and all(v.ok for v in clear_page.verdicts)
+    assert "まだ消していない 2 枚" in clear_page.pending_label.text()
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[2]))
+    clear_page.delete_all()
+    for _ in range(100):
+        _pump(app, 0.1)
+        if shown:
+            break
+    assert shown and "2 枚から 4 ファイルを削除しました" in shown[0]
     assert os.listdir(cards / "vol_318" / "DCIM" / "100_BTCF") == []
+    assert "すべて消してあります" in clear_page.pending_label.text()
     win.grab().save(str(tmp_path / "clear.png"))
 
-    # 残りの画面も開く（ID付け・スロット名は挿さっているカードを一覧にする）
-    for cls in (LedgerPage, SettingsPage, IdPage, SlotPage):
+    # 残りの画面も開く（ID付けは挿さっているカードを一覧にする）
+    for cls in (LedgerPage, SettingsPage, IdPage):
         win.show_page(cls)
         _pump(app, 0.2)
     win.page(IdPage).scan()
     assert win.page(IdPage).table.rowCount() == 2
-    win.page(SlotPage).scan()
-    assert win.page(SlotPage).table.rowCount() == 2
+    # 設定画面は値を変えるとそのまま保存される
+    sp = win.page(SettingsPage)
+    sp.conv_crf.setValue(26)
+    assert ctx.settings.convert_crf == 26 and "保存しました" in sp.saved_label.text()
+    from camtrapdesk.config import load_settings
+    assert load_settings().convert_crf == 26
     win.close()
     _pump(app, 0.2)
 

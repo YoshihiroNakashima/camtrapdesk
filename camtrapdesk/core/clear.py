@@ -18,6 +18,7 @@ class ClearVerdict:
     ingest: L.Ingest | None
     ok: bool = False                      # 削除してよい
     deletable: list[str] = field(default_factory=list)    # 削除するファイル名
+    broken: list[str] = field(default_factory=list)       # そのうち、取り込み時に壊れていて保存先には無いもの
     extra: list[str] = field(default_factory=list)        # 台帳に無い（残す）ファイル
     reasons: list[str] = field(default_factory=list)      # 削除しない理由・注意
     checked_destination: str = ""
@@ -58,10 +59,17 @@ def check_card(card: Card, ledger: L.Ledger, s: Settings, verify_hash: bool = Fa
         return v
     recs = {f.card_name: f for f in ledger.files_for(ing.id) if not f.deleted_at}   # カード上の名前で引く
     mismatch = 0
+    n_broken = 0
     for f in card.files:
         r = recs.get(f.name)
         if r is None:
             v.extra.append(f.name)
+            continue
+        if r.broken:
+            # 取り込み時に壊れていると分かったファイル。保存先には無いが、カードからは消してよい
+            v.broken.append(f.name)
+            v.deletable.append(f.name)
+            n_broken += 1
             continue
         if r.card_size != f.size:
             mismatch += 1
@@ -75,6 +83,8 @@ def check_card(card: Card, ledger: L.Ledger, s: Settings, verify_hash: bool = Fa
         v.deletable.append(f.name)
     if v.extra:
         v.reasons.append(f"台帳に無いファイルが{len(v.extra)}件あります（削除しません）")
+    if n_broken:
+        v.reasons.append(f"取り込み時に壊れていた {n_broken} ファイルも消します（保存先にはありません）")
 
     # 最終保存先（NASがあればNAS、無ければ中継先）に実体があるか
     if ing.nas_root and ing.status == L.STATUS_SYNCED:
@@ -86,6 +96,8 @@ def check_card(card: Card, ledger: L.Ledger, s: Settings, verify_hash: bool = Fa
         missing = []
         for name in v.deletable:
             r = recs[name]
+            if r.broken:
+                continue
             p = os.path.join(dest_dir, r.name)   # 変換済みなら mp4 の名前とサイズで確かめる
             if not os.path.isfile(p) or os.path.getsize(p) != r.size:
                 missing.append(name)

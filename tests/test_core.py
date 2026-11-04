@@ -502,7 +502,8 @@ def test_generic_fieldnote_without_season_and_type(env):
     """Season/Type 列が無い野帳、整形ルール無し、シーズンフォルダ無しでも一通り動く（他の研究室向けの既定）。"""
     from openpyxl import Workbook
     s = Settings(dest_root=str(env["dest"]), nas_root=str(env["nas"]), season_folder="",
-                 scan_roots=[str(env["cards"])], concurrency=2, poll_interval_sec=0.2, min_free_gb=0)
+                 scan_roots=[str(env["cards"])], concurrency=2, poll_interval_sec=0.2, min_free_gb=0,
+                 broken_check=False)   # make_card の .MP4 は中身がでたらめなので
     s.station_prefix, s.station_digits = "", 0    # 接頭辞もゼロ埋めも無し → 野帳の値そのまま
     env["settings"] = s
     ledger = env["ledger"]
@@ -976,3 +977,196 @@ def test_probe_without_ffprobe(monkeypatch, tmp_path):
     monkeypatch.setattr(F, "ffprobe_path", lambda ffmpeg: None)
     info = F.probe(ff, str(p))
     assert info and info.vcodec == "mjpeg" and (info.width, info.height) == (96, 64) and abs(info.duration - 1.0) < 0.3
+
+
+# ----------------------------------------------------------------------------
+# 壊れたファイル（スキャンと修復が出るカード）
+# ----------------------------------------------------------------------------
+
+def test_check_media_file_structural(tmp_path):
+    """ffmpeg 無しでも分かる壊れ方: 0 バイト、途中で切れた AVI、終端の無い JPEG、moov の無い mp4。"""
+    import struct
+    from camtrapdesk.core.mediacheck import check_media_file
+    (tmp_path / "zero.avi").write_bytes(b"")
+    assert "0 バイト" in check_media_file(str(tmp_path / "zero.avi"))
+    body = b"x" * 1000
+    ok_avi = b"RIFF" + struct.pack("<I", len(body) + 4) + b"AVI " + body
+    (tmp_path / "ok.avi").write_bytes(ok_avi)
+    assert check_media_file(str(tmp_path / "ok.avi")) is None
+    (tmp_path / "cut.avi").write_bytes(ok_avi[:600])                      # ヘッダのサイズより短い
+    assert "途中で切れて" in check_media_file(str(tmp_path / "cut.avi"))
+    (tmp_path / "unfinished.avi").write_bytes(b"RIFF" + struct.pack("<I", 0) + b"AVI " + body)
+    assert "完了していません" in check_media_file(str(tmp_path / "unfinished.avi"))
+    # 1 GB 超の AVI は最初の RIFF が実サイズより小さい（OpenDML）→ 正常
+    (tmp_path / "odml.avi").write_bytes(b"RIFF" + struct.pack("<I", 100) + b"AVI " + body)
+    assert check_media_file(str(tmp_path / "odml.avi")) is None
+    (tmp_path / "ok.jpg").write_bytes(b"\xff\xd8" + b"j" * 100 + b"\xff\xd9")
+    assert check_media_file(str(tmp_path / "ok.jpg")) is None
+    (tmp_path / "cut.jpg").write_bytes(b"\xff\xd8" + b"j" * 100)
+    assert "終端" in check_media_file(str(tmp_path / "cut.jpg"))
+    ftyp = struct.pack(">I", 16) + b"ftyp" + b"isom" + struct.pack(">I", 0)
+    moov = struct.pack(">I", 8) + b"moov"
+    mdat = struct.pack(">I", 8 + 500) + b"mdat" + b"m" * 500
+    (tmp_path / "ok.mp4").write_bytes(ftyp + moov + mdat)
+    assert check_media_file(str(tmp_path / "ok.mp4")) is None
+    (tmp_path / "nomoov.mp4").write_bytes(ftyp + mdat)
+    assert "moov" in check_media_file(str(tmp_path / "nomoov.mp4"))
+    (tmp_path / "cut.mp4").write_bytes((ftyp + moov + mdat)[:-100])
+    assert "途中で切れて" in check_media_file(str(tmp_path / "cut.mp4"))
+
+
+def _broken_env(env, action="delete"):
+    """良い AVI 2 本と、壊れた 3 ファイル（途中で切れた AVI、0 バイト、終端の無い JPEG）を持つカード。"""
+    import pytest
+    from camtrapdesk.core.ffmpeg import find_ffmpeg
+    if not find_ffmpeg():
+        pytest.skip("ffmpeg が無い")
+    s = env["settings"]
+    s.broken_check = True
+    s.broken_action = action
+    s.media_extensions = ["mp4", "avi", "jpg"]
+    cards = env["cards"]
+    root, _ = make_card(cards, "264", n_files=0)
+    media = os.path.join(root, "DCIM", "100_BTCF")
+    assert make_avi(os.path.join(media, "IMG_0001.AVI")) and make_avi(os.path.join(media, "IMG_0002.AVI"))
+    good = open(os.path.join(media, "IMG_0001.AVI"), "rb").read()
+    with open(os.path.join(media, "IMG_0003.AVI"), "wb") as f:
+        f.write(good[: len(good) // 2])          # 途中で切れた
+    open(os.path.join(media, "IMG_0004.AVI"), "wb").close()   # 0 バイト
+    with open(os.path.join(media, "IMG_0005.JPG"), "wb") as f:
+        f.write(b"\xff\xd8" + b"j" * 300)        # 終端マーカー無し
+    return root, media
+
+
+def test_broken_files_are_removed_after_copy_and_deleted_from_card(env):
+    """壊れたファイルはいったん全部コピーしてから中継で見つけて消す。NAS には送らず、カードからは削除できる。"""
+    s, ledger = env["settings"], env["ledger"]
+    root, media = _broken_env(env)
+    mgr, logs = run_ingest(env)
+    job = next(iter(mgr.jobs.values()))
+    assert job.state == S_DONE and "壊れていた 3 ファイル" in job.message, (job.message, logs)
+    ing = ledger.latest_ingest_for_card("264")
+    d = env["dest"] / "N260710" / "264"
+    assert sorted(os.listdir(d)) == ["IMG_0001.AVI", "IMG_0002.AVI", "manifest.json"]
+    recs = {f.name: f for f in ledger.files_for(ing.id)}
+    assert recs["IMG_0003.AVI"].broken and "途中で切れて" in recs["IMG_0003.AVI"].broken
+    assert recs["IMG_0004.AVI"].broken and recs["IMG_0005.JPG"].broken
+    assert not recs["IMG_0001.AVI"].broken and recs["IMG_0001.AVI"].staging_ok
+    man = L.Ledger.read_manifest(str(d))
+    assert man["n_files"] == 2 and {b["name"] for b in man["broken_files"]} == {"IMG_0003.AVI", "IMG_0004.AVI", "IMG_0005.JPG"}
+    # NAS へは良いファイルだけ
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    while ledger.pending_nas():
+        syncer._tick()
+    assert ledger.latest_ingest_for_card("264").status == L.STATUS_SYNCED
+    assert sorted(os.listdir(env["nas"] / "N260710" / "264")) == ["IMG_0001.AVI", "IMG_0002.AVI", "manifest.json"]
+    # 削除判定: 壊れたファイルも消す（保存先には無いが）
+    vols = list_volumes(scan_roots=[str(env["cards"])])
+    card = detect_cards(vols, "id.txt", ["DCIM/100_BTCF"], s.media_extensions, False, 0)[0]
+    v = check_card(card, ledger, s)
+    assert v.ok, v.reasons
+    assert sorted(v.deletable) == ["IMG_0001.AVI", "IMG_0002.AVI", "IMG_0003.AVI", "IMG_0004.AVI", "IMG_0005.JPG"]
+    assert sorted(v.broken) == ["IMG_0003.AVI", "IMG_0004.AVI", "IMG_0005.JPG"]
+    n, errs = delete_files(v, ledger, log=lambda m: None)
+    assert n == 5 and not errs
+    assert os.listdir(media) == []
+    assert ledger.latest_ingest_for_card("264", include_cleared=True).cleared_at
+    # 台帳を manifest から作り直しても壊れた記録が残る
+    ledger2 = L.Ledger(str(env["tmp"] / "ledger2.sqlite"))
+    assert ledger2.rebuild_from_manifests(str(env["nas"]), str(env["nas"])) == 1
+    ing2 = ledger2.latest_ingest_for_card("264")
+    assert sum(1 for f in ledger2.files_for(ing2.id) if f.broken) == 3
+
+
+def test_broken_files_can_be_kept_in_subfolder(env):
+    s, ledger = env["settings"], env["ledger"]
+    _broken_env(env, action="keep")
+    mgr, logs = run_ingest(env)
+    job = next(iter(mgr.jobs.values()))
+    assert job.state == S_DONE and "_破損" in job.message, (job.message, logs)
+    d = env["dest"] / "N260710" / "264"
+    assert sorted(os.listdir(d)) == ["IMG_0001.AVI", "IMG_0002.AVI", "_破損", "manifest.json"]
+    assert sorted(os.listdir(d / "_破損")) == ["IMG_0003.AVI", "IMG_0004.AVI", "IMG_0005.JPG"]
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    while ledger.pending_nas():
+        syncer._tick()
+    assert sorted(os.listdir(env["nas"] / "N260710" / "264")) == ["IMG_0001.AVI", "IMG_0002.AVI", "manifest.json"]
+
+
+def test_broken_files_are_not_converted(env):
+    """変換が有効でも、壊れた AVI は変換対象にならない（良いものだけ mp4 になる）。"""
+    from camtrapdesk.core.convert import Converter
+    s, ledger = env["settings"], env["ledger"]
+    _broken_env(env)
+    s.convert_enabled = True
+    s.convert_encoder = "libx264"
+    s.convert_parallel = 1
+    mgr, logs = run_ingest(env)
+    ing = ledger.latest_ingest_for_card("264")
+    assert ing.convert_pending == 2, logs
+    conv = Converter(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    for _ in range(5):
+        conv._tick()
+        if not ledger.pending_convert():
+            break
+    assert not ledger.pending_convert()
+    d = env["dest"] / "N260710" / "264"
+    assert sorted(os.listdir(d)) == ["IMG_0001.mp4", "IMG_0002.mp4", "manifest.json"]
+
+
+# ----------------------------------------------------------------------------
+# csv の野帳と、設置記録との照合
+# ----------------------------------------------------------------------------
+
+def test_csv_fieldnote(tmp_path):
+    s = nakashima_settings()
+    p = tmp_path / "note.csv"
+    p.write_text("Season,Station,InstallationSD,RetrievalSD,Remarks\n260710,482,260,319,\n260710,592,74,318,ok\n",
+                 encoding="cp932")
+    fn = load_fieldnote(str(p), s)
+    assert fn.sheets == [] and fn.sheet == ""
+    assert [r.station for r in fn.rows] == ["482", "592"] and fn.rows[1].retrieval_sd == "318"
+    assert fn.distinct("Season") == ["260710"]
+    m = build_mapping(fn, [("Season", "260710")], s)
+    assert {e.station_folder: e.card_id for e in m.entries} == {"BSN0482": "319", "BSN0592": "318"}
+    # 回収SD の列が無い表でも、設置記録としてなら読める
+    q = tmp_path / "install.csv"
+    q.write_text("Station\tInstallationSD\n482\t319\n", encoding="utf-8-sig")
+    fn2 = load_fieldnote(str(q), s, require_retrieval=False)
+    assert fn2.rows[0].station == "482" and fn2.rows[0].get("InstallationSD") == "319"
+    import pytest
+    with pytest.raises(ValueError):
+        load_fieldnote(str(q), s)
+
+
+def test_installation_cross_check(tmp_path):
+    """前の調査回の行（地点 → 設置SD）と、今回の行（地点 → 回収SD）を突き合わせ、合わない行に注意を付ける。"""
+    from camtrapdesk.core.fieldnote import cross_check_installation
+    s = nakashima_settings()
+    fn_path = tmp_path / "fieldnote.xlsx"
+    make_fieldnote(fn_path, [
+        {"season": 260424, "station": 482, "inst": 319, "ret": 10},
+        {"season": 260424, "station": 980, "inst": 555, "ret": 11},
+        {"season": 260424, "station": 123, "inst": 900, "ret": 12},    # 今回の回収行が無い
+        {"season": 260710, "station": 482, "inst": 260, "ret": 319},   # 一致
+        {"season": 260710, "station": 980, "inst": 556, "ret": 11},    # 不一致（設置は 555）
+        {"season": 260710, "station": 592, "inst": 74, "ret": 318},    # 設置記録に無い地点
+    ])
+    fn = load_fieldnote(str(fn_path), s)
+    m = build_mapping(fn, [("Season", "260710")], s)
+    res = cross_check_installation(m, fn, [("Season", "260424")], s)
+    assert (res.n_install_rows, res.n_match, res.n_mismatch, res.n_no_record) == (3, 1, 1, 1)
+    by = {e.station_folder: e for e in m.entries}
+    assert not by["BSN0482"].warnings
+    assert any("555" in w and "一致しません" in w for w in by["BSN0980"].warnings)
+    assert any("設置記録にこの地点がありません" in w for w in by["BSN0592"].warnings)
+    assert any("BSN0123" in x and "回収行がありません" in x for x in m.issues)
+    assert any("一致しない行が 1 件" in x for x in m.issues)
+    # 列や条件が無ければ照合せず理由を残す
+    s2 = nakashima_settings(col_installation_sd="NoSuchColumn")
+    m2 = build_mapping(fn, [("Season", "260710")], s2)
+    res2 = cross_check_installation(m2, fn, [], s2)
+    assert res2.n_checked == 0 and any("NoSuchColumn" in x for x in m2.issues)
+    m3 = build_mapping(fn, [("Season", "260710")], s)
+    res3 = cross_check_installation(m3, fn, [("Season", "999999")], s)
+    assert res3.n_install_rows == 0 and any("条件に合う行がありません" in x for x in m3.issues)

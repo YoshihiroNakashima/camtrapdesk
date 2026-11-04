@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS files (
     src_name TEXT,
     src_size INTEGER,
     src_hash TEXT,
-    converted INTEGER DEFAULT 0
+    converted INTEGER DEFAULT 0,
+    broken TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_files_ingest ON files(ingest_id);
 CREATE TABLE IF NOT EXISTS card_volumes (
@@ -141,6 +142,12 @@ class FileRec:
     src_size: int | None = None     # カード上の元のサイズ
     src_hash: str | None = None     # カード上の元ファイルのハッシュ
     converted: bool = False         # mp4 に変換済み
+    broken: str | None = None       # 壊れていた理由（中継から取り除き、NAS には送らない。カードからは削除してよい）
+
+    @property
+    def usable(self) -> bool:
+        """保存先にある（あるべき）ファイル: カードから消しておらず、壊れてもいない。"""
+        return not self.deleted_at and not self.broken
 
     @property
     def card_name(self) -> str:
@@ -180,6 +187,8 @@ class Ledger:
             c.execute("ALTER TABLE files ADD COLUMN src_size INTEGER")
             c.execute("ALTER TABLE files ADD COLUMN src_hash TEXT")
             c.execute("ALTER TABLE files ADD COLUMN converted INTEGER DEFAULT 0")
+        if "broken" not in fcols:
+            c.execute("ALTER TABLE files ADD COLUMN broken TEXT")
 
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
@@ -291,6 +300,26 @@ class Ledger:
             rows = c.execute("SELECT dest_root, dest_root_id FROM ingests GROUP BY dest_root, dest_root_id ORDER BY MAX(id) DESC")
             return [(r["dest_root"], r["dest_root_id"]) for r in rows]
 
+    def season_folders(self) -> list[str]:
+        """台帳に出てくる取り込み先のフォルダ名（新しい順）。"""
+        with self._conn() as c:
+            rows = c.execute("SELECT season_folder FROM ingests GROUP BY season_folder ORDER BY MAX(id) DESC")
+            return [r["season_folder"] for r in rows]
+
+    def cards_in_folder(self, season_folder: str) -> list[Ingest]:
+        """そのフォルダに取り込んだカードごとの最新の記録（削除済みも含む）。カードを消し忘れていないかの確認に使う。"""
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM ingests WHERE season_folder = ? ORDER BY id DESC", (season_folder,))
+            seen: set[str] = set()
+            out: list[Ingest] = []
+            for r in rows:
+                ing = self._row_to_ingest(r)
+                if ing.card_id_norm in seen:
+                    continue
+                seen.add(ing.card_id_norm)
+                out.append(ing)
+            return out
+
     def find_by_dir(self, season_folder: str, dir_name: str) -> Ingest | None:
         with self._conn() as c:
             r = c.execute("SELECT * FROM ingests WHERE season_folder = ? AND dir_name = ?"
@@ -329,6 +358,16 @@ class Ledger:
             c.execute("UPDATE files SET hash = ?, staging_ok = ? WHERE ingest_id = ? AND name = ?",
                       (hash_, 1 if staging_ok else 0, ingest_id, name))
 
+    def set_file_broken(self, ingest_id: int, name: str, reason: str) -> None:
+        """壊れていたファイル: 中継には置かない（消した／_破損 に移した）ので staging_ok を落とし、理由を残す。"""
+        with self._lock, self._conn() as c:
+            c.execute("UPDATE files SET broken = ?, staging_ok = 0, nas_ok = 0 WHERE ingest_id = ? AND name = ?",
+                      (reason or "壊れています", ingest_id, name))
+
+    def usable_files_for(self, ingest_id: int) -> list[FileRec]:
+        """保存先にあるべきファイル（カードから削除済み・壊れたものを除く）。NAS 転送や変換はこれを対象にする。"""
+        return [f for f in self.files_for(ingest_id) if f.usable]
+
     def set_file_nas_ok(self, ingest_id: int, name: str, ok: bool) -> None:
         with self._lock, self._conn() as c:
             c.execute("UPDATE files SET nas_ok = ? WHERE ingest_id = ? AND name = ?",
@@ -348,7 +387,7 @@ class Ledger:
                             mtime=r["mtime"], hash=r["hash"], src_path=r["src_path"],
                             staging_ok=bool(r["staging_ok"]), nas_ok=bool(r["nas_ok"]),
                             deleted_at=r["deleted_at"], src_name=r["src_name"], src_size=r["src_size"],
-                            src_hash=r["src_hash"], converted=bool(r["converted"])) for r in rows]
+                            src_hash=r["src_hash"], converted=bool(r["converted"]), broken=r["broken"]) for r in rows]
 
     def renormalize_card_ids(self) -> int:
         """照合ルールの変更後に、全レコードの card_id_norm を計算し直す。"""
@@ -368,7 +407,9 @@ class Ledger:
         ing = self.get_ingest(ingest_id)
         if ing is None:
             raise ValueError("ingest not found")
-        files = self.files_for(ingest_id)
+        all_files = self.files_for(ingest_id)
+        files = [f for f in all_files if not f.broken]
+        broken = [f for f in all_files if f.broken]
         data: dict[str, Any] = {
             "app": "camtrapdesk",
             "manifest_version": 1,
@@ -391,6 +432,9 @@ class Ledger:
                        **({"src_name": f.src_name, "src_size": f.src_size, "src_hash": f.src_hash, "converted": True}
                           if f.converted else {})} for f in files],
         }
+        if broken:
+            # 壊れていてここには置かなかったファイル（カード上の名前・サイズと理由）
+            data["broken_files"] = [{"name": f.card_name, "size": f.card_size, "reason": f.broken} for f in broken]
         if extra:
             data.update(extra)
         os.makedirs(directory, exist_ok=True)
@@ -440,6 +484,9 @@ class Ledger:
                                      m.get("source_label") or "", m.get("n_files", 0), m.get("total_bytes", 0),
                                      dest_root_id=m.get("dest_root_id"))
             self.add_files(iid, [(f["name"], f["size"], f.get("mtime") or 0.0, None) for f in m.get("files", [])])
+            for b in m.get("broken_files", []) or []:
+                self.add_files(iid, [(b["name"], int(b.get("size") or 0), 0.0, None)])
+                self.set_file_broken(iid, b["name"], b.get("reason") or "壊れています")
             for f in m.get("files", []):
                 if f.get("hash"):
                     self.set_file_hash(iid, f["name"], f["hash"], True)

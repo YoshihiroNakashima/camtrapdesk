@@ -25,7 +25,7 @@ from .hashing import hash_file
 
 PART_SUFFIX = ".part"
 SKIP_DIR_PREFIXES = (".", "@", "#", "$")          # @eaDir（Synology のサムネイル）、#recycle、$RECYCLE.BIN など
-SKIP_DIR_NAMES = {"system volume information", "synoreport"}
+SKIP_DIR_NAMES = {"system volume information", "synoreport", "_破損"}   # _破損: 取り込み時に壊れていたファイルの置き場
 
 A_CONVERT = "convert"   # 変換する
 A_FINISH = "finish"     # 変換済みの mp4 が既にある（前回、元を消す前に止まった）→ 元を消すだけ
