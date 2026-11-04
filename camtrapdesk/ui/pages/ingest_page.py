@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QCheckBox, QFormLayout, QGroupBox, QHBoxLayout, Q
 
 from ...core import ingest as I
 from ..context import AppContext
-from ..widgets import COLORS, PathRow, human_size, make_table, set_row, volume_sort_key
+from ..widgets import COLORS, PathRow, enable_sorting, human_size, make_table, refill_sorted, set_row, volume_sort_key
 
 
 class IngestPage(QWidget):
@@ -79,7 +79,9 @@ class IngestPage(QWidget):
 
         # --- 表とログ ---
         split = QSplitter(Qt.Orientation.Vertical)
-        self.table = make_table(["ドライブ", "カードID", "ファイル数", "容量", "状態", "進捗", "メッセージ"])
+        self.table = make_table(["No.", "ドライブ", "カードID", "ファイル数", "容量", "状態", "進捗", "メッセージ"])
+        self.table.setToolTip("見出しをクリックすると並べ替え（No. は読んだ順の通し番号）。行を選んで「取り込みを停止」でそのカードだけ止められます")
+        enable_sorting(self.table, 0)
         split.addWidget(self.table)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -252,11 +254,20 @@ class IngestPage(QWidget):
         rows = {i.row() for i in self.table.selectedIndexes()}
         keys = []
         for r in rows:
-            it = self.table.item(r, 1)
+            it = self.table.item(r, 0)
             key = it.data(Qt.ItemDataRole.UserRole) if it else None
             if key:
                 keys.append(key)
         return keys
+
+    def _select_keys(self, keys: set[str]) -> None:
+        if not keys:
+            return
+        self.table.clearSelection()
+        for r in range(self.table.rowCount()):
+            it = self.table.item(r, 0)
+            if it and it.data(Qt.ItemDataRole.UserRole) in keys:
+                self.table.selectRow(r)
 
     def _stop_clicked(self) -> None:
         ing = self.ctx.ingest
@@ -374,10 +385,37 @@ class IngestPage(QWidget):
         if not self._dirty:
             return
         self._dirty = False
-        jobs = sorted(self.ctx.ingest.jobs.values(), key=lambda j: volume_sort_key(j.card.volume))
+        selected = set(self._selected_keys())
+        jobs = sorted(self.ctx.ingest.jobs.values(), key=lambda j: j.seq)
         others = sorted(self.ctx.ingest.others.values(), key=lambda o: volume_sort_key(o[0]))
-        self.table.setRowCount(len(jobs) + len(others))
         n_done = n_active = n_err = n_stopped = 0
+        with refill_sorted(self.table):
+            self._fill_rows(jobs, others)
+            for job in jobs:
+                st = job.state
+                if st == I.S_DONE:
+                    n_done += 1
+                elif st in (I.S_QUEUED, I.S_WAITING, I.S_COPYING, I.S_VERIFYING):
+                    n_active += 1
+                elif st == I.S_ERROR:
+                    n_err += 1
+                elif st == I.S_STOPPED:
+                    n_stopped += 1
+        self._select_keys(selected)
+        n_noid = sum(1 for v, _r in others if v.kind != "unreadable")
+        n_unread = sum(1 for v, _r in others if v.kind == "unreadable")
+        extra = ""
+        if n_noid:
+            extra += f" / IDなし {n_noid}"
+        if n_unread:
+            extra += f" / 読めません {n_unread}"
+        if n_stopped:
+            extra += f" / 停止 {n_stopped}"
+        self.summary_label.setText(f"検出 {len(jobs)} 枚 / 処理中 {n_active} / 完了 {n_done} / エラー {n_err}{extra}"
+                                   f"　（この起動で読んだ通算 {self.ctx.ingest.seq_count} 枚）")
+
+    def _fill_rows(self, jobs, others) -> None:
+        self.table.setRowCount(len(jobs) + len(others))
         for r, job in enumerate(jobs):
             st = job.state
             color = {I.S_DONE: COLORS["ok"], I.S_ERROR: COLORS["err"], I.S_SKIPPED: COLORS["muted"],
@@ -387,34 +425,15 @@ class IngestPage(QWidget):
             spd = job.speed_mbps
             if prog and spd:
                 prog += f" ({spd:.0f} MB/s)"
-            set_row(self.table, r, [job.card.volume.display, job.card.card_id, str(job.card.n_files),
+            set_row(self.table, r, [str(job.seq), job.card.volume.display, job.card.card_id, str(job.card.n_files),
                                     human_size(job.card.total_bytes), I.STATE_LABELS.get(st, st), prog, job.message],
                     color)
-            self.table.item(r, 1).setData(Qt.ItemDataRole.UserRole, job.key)
-            if st == I.S_DONE:
-                n_done += 1
-            elif st in (I.S_QUEUED, I.S_WAITING, I.S_COPYING, I.S_VERIFYING):
-                n_active += 1
-            elif st == I.S_ERROR:
-                n_err += 1
-            elif st == I.S_STOPPED:
-                n_stopped += 1
-        n_noid = n_unread = 0
+            self.table.item(r, 0).setData(Qt.ItemDataRole.UserRole, job.key)
         for i, (v, reason) in enumerate(others):
             r = len(jobs) + i
             if v.kind == "unreadable":
                 state, color = "読めません", COLORS["err"]
-                n_unread += 1
             else:
                 state, color = "IDなし", COLORS["warn"]
-                n_noid += 1
                 reason = reason + "。左の「カードにIDを付ける」で番号を付けてください"
-            set_row(self.table, r, [v.display, "", "", "", state, "", f"{v.label}: {reason}"], color)
-        extra = ""
-        if n_noid:
-            extra += f" / IDなし {n_noid}"
-        if n_unread:
-            extra += f" / 読めません {n_unread}"
-        if n_stopped:
-            extra += f" / 停止 {n_stopped}"
-        self.summary_label.setText(f"検出 {len(jobs)} 枚 / 処理中 {n_active} / 完了 {n_done} / エラー {n_err}{extra}")
+            set_row(self.table, r, ["", v.display, "", "", "", state, "", f"{v.label}: {reason}"], color)

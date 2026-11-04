@@ -71,6 +71,7 @@ def _gb(n: int) -> str:
 class CardJob:
     key: str
     card: Card
+    seq: int = 0                 # 今回の起動で検出した通し番号（読んだ順。1 から）
     state: str = S_DETECTED
     message: str = ""
     done_bytes: int = 0
@@ -113,6 +114,7 @@ class IngestManager:
         self.armed = armed
         self.on_arm_change = on_arm_change
         self._dirty_cache: dict[str, bool] = {}   # ボリューム → ダーティビット（検出のたびに読まない）
+        self.seq_count = 0                          # 今回の起動で検出したカードの通算
         self.ledger = ledger
         self.on_update = on_update
         self.on_log = on_log
@@ -302,7 +304,8 @@ class IngestManager:
                 c.needs_repair = self._dirty_cache[c.volume.key]
                 if c.needs_repair:
                     c.warnings.insert(0, "Windows が修復を勧めているカード（壊れたファイルの疑い）。取り込みが終わってから修復します")
-                job = CardJob(key=c.volume.key, card=c, total_bytes=c.total_bytes)
+                self.seq_count += 1
+                job = CardJob(key=c.volume.key, card=c, total_bytes=c.total_bytes, seq=self.seq_count)
                 if c.problems:
                     job.state = S_ERROR
                     job.message = "; ".join(c.problems)
@@ -319,7 +322,7 @@ class IngestManager:
             else:
                 job.message = "「取り込みを開始」を押すと始まります（保存先とフォルダ名を確認してから）"
                 self.on_update(job)
-                self.on_log(f"[{job.card.card_id}] 検出（{job.card.n_files}ファイル, {job.card.total_bytes/1e9:.2f} GB）。開始待ち")
+                self.on_log(f"[{job.card.card_id}] 検出 #{job.seq}（{job.card.n_files}ファイル, {job.card.total_bytes/1e9:.2f} GB）。開始待ち")
         self._check_batch_done()
 
     def _check_batch_done(self) -> None:

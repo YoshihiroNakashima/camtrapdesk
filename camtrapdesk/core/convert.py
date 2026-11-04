@@ -70,6 +70,7 @@ class Converter:
         s = self.get_settings()
         pending = self.ledger.pending_convert()
         if not s.convert_enabled:
+            self.current = None
             if pending:
                 # 変換をオフにしたので、残っていた分は元のまま NAS へ送る
                 for ing in pending:
@@ -138,9 +139,11 @@ class Converter:
                     if not ok:
                         self._failed.add((ing.id, f.name))
 
-            with ThreadPoolExecutor(max_workers=max(1, int(s.convert_parallel)), thread_name_prefix="ffmpeg") as pool:
-                list(pool.map(work, files))
-            self.current = None
+            try:
+                with ThreadPoolExecutor(max_workers=max(1, int(s.convert_parallel)), thread_name_prefix="ffmpeg") as pool:
+                    list(pool.map(work, files))
+            finally:
+                self.current = None   # 途中で例外が出ても「変換中」のまま残さない（終了時の確認に使う）
             if self._stop.is_set():
                 return
         remaining = len(self._targets(ing, s))

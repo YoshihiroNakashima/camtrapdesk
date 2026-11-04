@@ -14,7 +14,7 @@ from ...core import rename as R
 from ...core.fieldnote import (Condition, Fieldnote, build_mapping, cross_check_installation, is_csv,
                                load_fieldnote)
 from ..context import AppContext
-from ..widgets import COLORS, PathRow, make_table, set_row
+from ..widgets import COLORS, PathRow, make_table, refill_sorted, set_row
 
 TABLE_FILTER = "表 (*.xlsx *.xlsm *.csv *.tsv);;Excel (*.xlsx *.xlsm);;CSV (*.csv *.tsv *.txt);;すべて (*)"
 
@@ -261,6 +261,9 @@ class RenamePage(QWidget):
 
         split = QSplitter(Qt.Orientation.Vertical)
         self.table = make_table(["結果", "カードID", "現在のフォルダ", "変更後", "場所", "野帳行", "日付", "State", "理由・注意"])
+        self.table.setSortingEnabled(True)
+        self.table.horizontalHeader().setSortIndicatorShown(True)
+        self.table.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)   # 既定はドライランの順（結果ごと）
         split.addWidget(self.table)
         self.issues = QPlainTextEdit()
         self.issues.setReadOnly(True)
@@ -506,6 +509,22 @@ class RenamePage(QWidget):
         order = {R.A_RENAME: 0, R.A_BLOCKED: 1, R.A_TARGET_EXISTS: 2, R.A_SYNCING: 3, R.A_MISSING: 4,
                  R.A_UNMAPPED: 5, R.A_ALREADY: 6}
         items = sorted(plan.items, key=lambda i: (order.get(i.action, 9), 0 if i.warnings else 1, i.dst_dir_name or i.src_dir_name))
+        with refill_sorted(self.table):
+            self._fill_rows(items)
+        lines = [f"使う行: {cond_text}" if cond_text else "",
+                 f"変更するフォルダ: {plan.season_dir}" + (f"　／　NAS: {plan.nas_season_dir}" if plan.nas_season_dir else ""),
+                 f"変更 {plan.count(R.A_RENAME)} / 保留 {plan.count(R.A_BLOCKED)} / 変更先が既存 {plan.count(R.A_TARGET_EXISTS)}"
+                 f" / NAS転送中 {plan.count(R.A_SYNCING)} / フォルダ無し {plan.count(R.A_MISSING)}"
+                 f" / 野帳に無い {plan.count(R.A_UNMAPPED)} / 変更済み {plan.count(R.A_ALREADY)}"]
+        if check_text:
+            lines.append(check_text)
+        if plan.issues:
+            lines.append("")
+            lines.append("【野帳側で確認が必要な点】")
+            lines += [" - " + x for x in plan.issues]
+        self.issues.setPlainText("\n".join(x for x in lines if x is not None))
+
+    def _fill_rows(self, items) -> None:
         self.table.setRowCount(len(items))
         for r, it in enumerate(items):
             color = {R.A_RENAME: COLORS["ok"], R.A_ALREADY: COLORS["muted"], R.A_MISSING: COLORS["warn"],
@@ -521,18 +540,6 @@ class RenamePage(QWidget):
             set_row(self.table, r, [label, it.card_id, it.src_dir_name,
                                     it.dst_dir_name, it.where, str(e.row_no) if e else "", e.date if e else "",
                                     e.state if e else "", note], color)
-        lines = [f"使う行: {cond_text}" if cond_text else "",
-                 f"変更するフォルダ: {plan.season_dir}" + (f"　／　NAS: {plan.nas_season_dir}" if plan.nas_season_dir else ""),
-                 f"変更 {plan.count(R.A_RENAME)} / 保留 {plan.count(R.A_BLOCKED)} / 変更先が既存 {plan.count(R.A_TARGET_EXISTS)}"
-                 f" / NAS転送中 {plan.count(R.A_SYNCING)} / フォルダ無し {plan.count(R.A_MISSING)}"
-                 f" / 野帳に無い {plan.count(R.A_UNMAPPED)} / 変更済み {plan.count(R.A_ALREADY)}"]
-        if check_text:
-            lines.append(check_text)
-        if plan.issues:
-            lines.append("")
-            lines.append("【野帳側で確認が必要な点】")
-            lines += [" - " + x for x in plan.issues]
-        self.issues.setPlainText("\n".join(x for x in lines if x is not None))
 
     def apply(self) -> None:
         if not self.plan:

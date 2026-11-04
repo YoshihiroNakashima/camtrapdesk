@@ -94,10 +94,51 @@ def make_table(headers: list[str], stretch_last: bool = True) -> QTableWidget:
     return t
 
 
+SORT_ROLE = Qt.ItemDataRole.UserRole + 1
+
+
+class SortItem(QTableWidgetItem):
+    """見出しをクリックして並べ替えるとき、数字は数の大小で（"10" が "9" の後に）、空欄は最後に並ぶ項目。"""
+
+    def __lt__(self, other) -> bool:  # noqa: D105
+        a, b = self.data(SORT_ROLE), other.data(SORT_ROLE)
+        if a is not None and b is not None:
+            return a < b
+        return super().__lt__(other)
+
+
 def set_row(t: QTableWidget, row: int, values: list[str], color: QColor | None = None) -> None:
     for col, v in enumerate(values):
-        item = QTableWidgetItem(str(v))
+        text = str(v)
+        item = SortItem(text)
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        item.setData(SORT_ROLE, ((1,) if not text.strip() else (0,)) + natural_key(text))
         if color is not None:
             item.setBackground(color)
         t.setItem(row, col, item)
+
+
+def enable_sorting(t: QTableWidget, default_col: int = 0) -> None:
+    """見出しのクリックで並べ替えられるようにする（表を作り直すときは refill_sorted を使う）。"""
+    t.setSortingEnabled(True)
+    t.horizontalHeader().setSortIndicatorShown(True)
+    t.sortItems(default_col, Qt.SortOrder.AscendingOrder)
+
+
+class refill_sorted:
+    """表を埋め直す間だけ並べ替えを止め、終わったら今の見出しの並び順で並べ直す（with 文で使う）。"""
+
+    def __init__(self, t: QTableWidget):
+        self.t = t
+
+    def __enter__(self):
+        h = self.t.horizontalHeader()
+        self.col, self.order = h.sortIndicatorSection(), h.sortIndicatorOrder()
+        self.t.setSortingEnabled(False)
+        return self.t
+
+    def __exit__(self, *_exc):
+        self.t.setSortingEnabled(True)
+        if self.col >= 0:
+            self.t.sortItems(self.col, self.order)
+        return False

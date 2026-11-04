@@ -126,12 +126,13 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QMessageBox
         from ..core import ingest as I
         active = [j for j in self.ctx.ingest.jobs.values() if j.state in (I.S_QUEUED, I.S_COPYING, I.S_VERIFYING)]
-        if active or self.ctx.nas.current or self.ctx.converter.current or self.ctx.batch.running:
+        converting = self.ctx.converter.current if self.ctx.settings.convert_enabled else None
+        if active or self.ctx.nas.current or converting or self.ctx.batch.running:
             parts = []
             if active:
                 parts.append(f"カードのコピーが {len(active)} 枚進行中")
-            if self.ctx.converter.current:
-                parts.append(f"mp4 への変換中（{self.ctx.converter.current}）")
+            if converting:
+                parts.append(f"取り込んだ動画の mp4 への変換中（{converting}。取り込み画面の「裏で続く処理」に進み具合）")
             if self.ctx.nas.current:
                 parts.append(f"NASへの転送中（{self.ctx.nas.current}）")
             if self.ctx.batch.running:

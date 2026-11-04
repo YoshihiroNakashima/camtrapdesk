@@ -20,7 +20,7 @@ from ...core.cards import detect_cards
 from ...core.clear import ClearVerdict, check_card, delete_files
 from ...core.volumes import list_volumes
 from ..context import AppContext
-from ..widgets import COLORS, human_size, make_table, set_row, volume_sort_key
+from ..widgets import COLORS, enable_sorting, human_size, make_table, refill_sorted, set_row, volume_sort_key
 
 
 class ClearPage(QWidget):
@@ -61,6 +61,7 @@ class ClearPage(QWidget):
 
         split = QSplitter(Qt.Orientation.Vertical)
         self.table = make_table(["ドライブ", "カードID", "判定", "取り込み先", "削除対象", "容量", "残す", "理由・注意"])
+        enable_sorting(self.table, 1)
         split.addWidget(self.table)
 
         # 台帳から見た消し忘れ
@@ -164,8 +165,16 @@ class ClearPage(QWidget):
     def _on_checked(self, verdicts: list, then_delete: bool) -> None:
         self._checking = False
         self.verdicts = verdicts
+        n_ok = sum(1 for v in verdicts if v.ok)
+        with refill_sorted(self.table):
+            self._fill_rows(verdicts)
+        self.summary_label.setText(f"挿入中 {len(verdicts)} 枚: 消せる {n_ok} / 消せない {len(verdicts) - n_ok}"
+                                   + "　" + time.strftime("%H:%M:%S"))
+        if then_delete:
+            self._confirm_and_delete()
+
+    def _fill_rows(self, verdicts: list) -> None:
         self.table.setRowCount(len(verdicts))
-        n_ok = 0
         for r, v in enumerate(verdicts):
             ing = v.ingest
             where = f"{ing.season_folder}/{ing.dir_name}" if ing else ""
@@ -178,11 +187,6 @@ class ClearPage(QWidget):
             set_row(self.table, r, [v.card.volume.display, v.card.card_id, "削除OK" if v.ok else "削除しない", where,
                                     str(len(v.deletable)), human_size(v.deletable_bytes), str(len(v.extra)),
                                     "; ".join(v.reasons)], color)
-            n_ok += 1 if v.ok else 0
-        self.summary_label.setText(f"挿入中 {len(verdicts)} 枚: 消せる {n_ok} / 消せない {len(verdicts) - n_ok}"
-                                   + "　" + time.strftime("%H:%M:%S"))
-        if then_delete:
-            self._confirm_and_delete()
 
     # ----------------------------------------------------------------- 削除
     def delete_all(self) -> None:
