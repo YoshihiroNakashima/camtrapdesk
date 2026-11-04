@@ -439,13 +439,13 @@ def test_no_space_mid_copy_resumes_after_space_returns(env, monkeypatch):
     state = {"fail": True}
     real = I.copy_with_hash
 
-    def flaky(src, dst, prog=None):
+    def flaky(src, dst, prog=None, **kw):
         if state["fail"] and dst.endswith("IMG_0001.MP4"):
             state["fail"] = False
             with open(dst + ".part", "wb") as f:
                 f.write(b"partial")
             raise OSError(errno.ENOSPC, "No space left on device")
-        return real(src, dst, prog)
+        return real(src, dst, prog, **kw)
 
     monkeypatch.setattr(I, "copy_with_hash", flaky)
     make_card(env["cards"], "264", n_files=3)
@@ -1184,10 +1184,10 @@ def test_unreadable_file_on_card_is_skipped_not_fatal(env, monkeypatch):
     make_card(env["cards"], "264", n_files=3)
     real = ING.copy_with_hash
 
-    def flaky(src, dst, progress=None):
+    def flaky(src, dst, progress=None, **kw):
         if src.endswith("IMG_0001.MP4"):
             raise OSError(errno.EIO, "ファイルまたはディレクトリが壊れているため、読み取ることができません")
-        return real(src, dst, progress)
+        return real(src, dst, progress, **kw)
 
     monkeypatch.setattr(ING, "copy_with_hash", flaky)
     mgr, logs = run_ingest(env)
