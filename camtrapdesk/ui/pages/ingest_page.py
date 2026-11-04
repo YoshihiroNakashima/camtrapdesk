@@ -93,9 +93,22 @@ class IngestPage(QWidget):
         # --- 変換・NAS ---
         nas_box = QGroupBox("裏で続く処理（mp4 への変換、NASへの転送）")
         nv = QVBoxLayout(nas_box)
+        cl = QHBoxLayout()
         self.convert_status = QLabel("")
-        self.convert_status.setVisible(False)
-        nv.addWidget(self.convert_status)
+        self.convert_pause = QPushButton("変換を一時停止")
+        self.convert_pause.setCheckable(True)
+        self.convert_pause.setToolTip("進行中の ffmpeg をすぐ止めます（書きかけは消す）。再開するとそのファイルからやり直します")
+        self.convert_pause.toggled.connect(self._convert_pause_toggled)
+        self.convert_abandon = QPushButton("変換を取りやめる…")
+        self.convert_abandon.setToolTip("残っている変換をやめ、未変換のファイルは元のまま NAS へ送ります")
+        self.convert_abandon.clicked.connect(self._convert_abandon)
+        cl.addWidget(self.convert_status, 2)
+        cl.addWidget(self.convert_pause)
+        cl.addWidget(self.convert_abandon)
+        self.convert_row = QWidget()
+        self.convert_row.setLayout(cl)
+        self.convert_row.setVisible(False)
+        nv.addWidget(self.convert_row)
         nl = QHBoxLayout()
         nv.addLayout(nl)
         self.nas_status = QLabel("NAS転送: 待機中")
@@ -244,6 +257,7 @@ class IngestPage(QWidget):
         self.ctx.nas.paused = on
         self.ctx.nas.wake()
         self.nas_pause.setText("NAS転送を再開" if on else "NAS転送を一時停止")
+        self._append_log("NAS転送を一時停止しました（送っている途中のファイルは止めて、再開時にやり直します）" if on else "NAS転送を再開しました")
 
     def _start_all(self) -> None:
         for key, job in list(self.ctx.ingest.jobs.items()):
@@ -365,7 +379,26 @@ class IngestPage(QWidget):
 
     def _on_convert_status(self, msg: str) -> None:
         self.convert_status.setText(msg)
-        self.convert_status.setVisible(bool(msg))
+        self.convert_row.setVisible(bool(msg))
+
+    def _convert_pause_toggled(self, on: bool) -> None:
+        self.ctx.converter.pause(on)
+        self.convert_pause.setText("変換を再開" if on else "変換を一時停止")
+        self._append_log("mp4 への変換を一時停止しました（進行中のファイルは止めて、再開時にやり直します）" if on else "mp4 への変換を再開しました")
+
+    def _convert_abandon(self) -> None:
+        n = self.ctx.converter.pending_count()
+        msg = (f"残っている変換（{n} 枚のカード）を取りやめます。進行中の ffmpeg は止め、未変換のファイルは元のまま NAS へ送ります。\n"
+               "今後のカードも変換しないなら、上の「動画の変換」のチェックも外してください。\n\n取りやめますか？")
+        if QMessageBox.question(self, "変換を取りやめる", msg) != QMessageBox.StandardButton.Yes:
+            return
+        self.ctx.converter.abandon()
+        if self.convert_pause.isChecked():
+            self.convert_pause.blockSignals(True)
+            self.convert_pause.setChecked(False)
+            self.convert_pause.setText("変換を一時停止")
+            self.convert_pause.blockSignals(False)
+        self._append_log(f"mp4 への変換を取りやめました（{n} 枚分）。未変換のファイルは元のまま NAS へ送ります")
 
     def _on_nas_status(self, msg: str) -> None:
         self.nas_status.setText(msg)

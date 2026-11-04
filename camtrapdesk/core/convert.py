@@ -32,6 +32,8 @@ class Converter:
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self.paused = False
+        self._interrupt = threading.Event()   # いまの ffmpeg を止める（一時停止・取りやめ）
+        self._abandon = False                 # 残りの変換を取りやめて、元のまま NAS へ送る
         self.current: str | None = None       # 変換中の "season/dir"
         self.last_status: str = ""            # 最後に on_status へ出した文（画面の確認用）
         self.encoder: str | None = None
@@ -56,6 +58,25 @@ class Converter:
     def wake(self) -> None:
         self._wake.set()
 
+    def pause(self, on: bool) -> None:
+        """一時停止。進行中の ffmpeg はすぐ止め（書きかけは消す）、再開するとそのファイルからやり直す。"""
+        self.paused = on
+        if on:
+            self._interrupt.set()
+        elif not self._abandon:
+            self._interrupt.clear()
+        self._wake.set()
+
+    def abandon(self) -> None:
+        """残っている変換を取りやめ、未変換のファイルは元のまま NAS へ送る。進行中の ffmpeg は止める。"""
+        self._abandon = True
+        self.paused = False
+        self._interrupt.set()
+        self._wake.set()
+
+    def pending_count(self) -> int:
+        return len(self.ledger.pending_convert())
+
     def busy(self) -> bool:
         """いま実際に変換しているか（スレッドが生きていて、カードを処理中）。"""
         return self.current is not None and bool(self._thread and self._thread.is_alive())
@@ -75,15 +96,21 @@ class Converter:
     def _tick(self) -> float:
         s = self.get_settings()
         pending = self.ledger.pending_convert()
-        if not s.convert_enabled:
+        if not s.convert_enabled or self._abandon:
             self.current = None
             if pending:
-                # 変換をオフにしたので、残っていた分は元のまま NAS へ送る
+                # 変換をオフにした／取りやめたので、残っていた分は元のまま NAS へ送る
+                why = "変換を取りやめたので" if self._abandon else "変換はオフなので"
                 for ing in pending:
                     self.ledger.set_convert_pending(ing.id, 0)
-                    self.on_log(f"[{ing.card_id}] 変換はオフなので元のファイルのまま NAS へ送ります")
+                    self.on_log(f"[{ing.card_id}] {why}元のファイルのまま NAS へ送ります")
                 if self.on_ingest_done:
                     self.on_ingest_done(0)
+            if self._abandon:
+                self._abandon = False
+                self._interrupt.clear()
+                self.on_status("変換: 取りやめました（残りは元のまま NAS へ）")
+                return 15.0
             self.on_status("")
             return 30.0
         if self.paused:
@@ -135,15 +162,15 @@ class Converter:
 
             def work(f: L.FileRec) -> None:
                 nonlocal done
-                if self._stop.is_set():
+                if self._stop.is_set() or self._interrupt.is_set():
                     return
                 with lock:
                     self.on_status(f"変換: {label} {f.name}（{done + 1}/{total}、{self.encoder}）")
                 ok = self._convert_file(ing, src_dir, f, ffmpeg, s, existing)
                 with lock:
                     done += 1
-                    if not ok:
-                        self._failed.add((ing.id, f.name))
+                    if ok is False:
+                        self._failed.add((ing.id, f.name))   # None は中断（失敗ではない）
 
             try:
                 with ThreadPoolExecutor(max_workers=max(1, int(s.convert_parallel)), thread_name_prefix="ffmpeg") as pool:
@@ -151,6 +178,13 @@ class Converter:
             finally:
                 self.current = None   # 途中で例外が出ても「変換中」のまま残さない（終了時の確認に使う）
             if self._stop.is_set():
+                return
+            if self._interrupt.is_set():
+                # 一時停止か取りやめ: 残りはそのまま（一時停止なら再開時に続き、取りやめなら _tick が元のまま送る）
+                if not self._abandon:
+                    self._interrupt.clear()
+                self.ledger.set_convert_pending(ing.id, len(self._targets(ing, s)) or 1)
+                self.on_log(f"[{ing.card_id}] 変換を中断しました（{done}/{total}）")
                 return
         remaining = len(self._targets(ing, s))
         if remaining:
@@ -168,7 +202,7 @@ class Converter:
             self.on_ingest_done(ing.id)
 
     def _convert_file(self, ing: L.Ingest, src_dir: str, f: L.FileRec, ffmpeg: str, s: Settings,
-                      existing: set[str]) -> bool:
+                      existing: set[str]) -> bool | None:
         src = os.path.join(src_dir, f.name)
         stem = f.name.rsplit(".", 1)[0] if "." in f.name else f.name
         new_name = stem + ".mp4"
@@ -185,12 +219,14 @@ class Converter:
             self.on_log(f"[{ing.card_id}] 変換元が見つかりません: {src}")
             return False
         t0 = time.time()
-        ok, msg = convert_to_mp4(ffmpeg, src, part, self.encoder or "libx264", int(s.convert_crf))
+        ok, msg = convert_to_mp4(ffmpeg, src, part, self.encoder or "libx264", int(s.convert_crf), stop=self._interrupt)
         if not ok:
             try:
                 os.remove(part)
             except OSError:
                 pass
+            if self._interrupt.is_set():
+                return None   # 中断（失敗ではない。再開時にやり直す）
             self.on_log(f"[{ing.card_id}] {f.name} の変換に失敗: {msg}（元のまま残します）")
             return False
         try:

@@ -1336,3 +1336,76 @@ def test_repair_windows_only_helpers_are_safe_elsewhere(tmp_path):
     if sys.platform != "win32":
         assert ts.suppress() is False and ts.restore() is False and ts.restore_leftover() is False
         assert notification_senders() == []
+
+
+# ----------------------------------------------------------------------------
+# 裏で続く処理（変換・NAS転送）の一時停止と取りやめ
+# ----------------------------------------------------------------------------
+
+def _convert_env(env):
+    import pytest
+    from camtrapdesk.core.ffmpeg import find_ffmpeg
+    if not find_ffmpeg():
+        pytest.skip("ffmpeg が無い")
+    s = env["settings"]
+    s.convert_enabled = True
+    s.convert_encoder = "libx264"
+    s.convert_parallel = 1
+    s.media_extensions = ["mp4", "avi"]
+    root, _ = make_card(env["cards"], "264", n_files=0)
+    media = os.path.join(root, "DCIM", "100_BTCF")
+    assert make_avi(os.path.join(media, "IMG_0001.AVI")) and make_avi(os.path.join(media, "IMG_0002.AVI"))
+    run_ingest(env)
+    return env["dest"] / "N260710" / "264"
+
+
+def test_convert_pause_and_resume(env):
+    from camtrapdesk.core.convert import Converter
+    s, ledger = env["settings"], env["ledger"]
+    d = _convert_env(env)
+    status = []
+    conv = Converter(lambda: s, ledger, on_status=status.append, on_log=lambda m: None)
+    conv.pause(True)
+    assert conv._tick() == 5.0 and "一時停止" in status[-1]
+    assert sorted(os.listdir(d)) == ["IMG_0001.AVI", "IMG_0002.AVI", "manifest.json"]   # 何も変換していない
+    assert ledger.pending_convert()
+    conv.pause(False)
+    for _ in range(5):
+        conv._tick()
+        if not ledger.pending_convert():
+            break
+    assert not ledger.pending_convert()
+    assert sorted(os.listdir(d)) == ["IMG_0001.mp4", "IMG_0002.mp4", "manifest.json"]
+
+
+def test_convert_abandon_sends_originals(env):
+    from camtrapdesk.core.convert import Converter
+    s, ledger = env["settings"], env["ledger"]
+    d = _convert_env(env)
+    logs = []
+    conv = Converter(lambda: s, ledger, on_status=lambda m: None, on_log=logs.append)
+    assert conv.pending_count() == 1
+    conv.abandon()
+    conv._tick()
+    assert not ledger.pending_convert() and any("取りやめた" in m for m in logs)
+    assert sorted(os.listdir(d)) == ["IMG_0001.AVI", "IMG_0002.AVI", "manifest.json"]
+    # NAS へは元の AVI のまま
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    while ledger.pending_nas():
+        syncer._tick()
+    assert sorted(os.listdir(env["nas"] / "N260710" / "264")) == ["IMG_0001.AVI", "IMG_0002.AVI", "manifest.json"]
+    # 取りやめのあとは普通に戻る（次に取り込むカードは変換される）
+    assert conv._abandon is False and not conv._interrupt.is_set()
+
+
+def test_nas_pause_stops_between_files_and_resumes(env):
+    s, ledger = env["settings"], env["ledger"]
+    make_card(env["cards"], "264", n_files=3)
+    run_ingest(env)
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    syncer.paused = True
+    assert syncer._tick() == 5.0 and ledger.pending_nas()
+    syncer.paused = False
+    while ledger.pending_nas():
+        syncer._tick()
+    assert ledger.latest_ingest_for_card("264").status == L.STATUS_SYNCED

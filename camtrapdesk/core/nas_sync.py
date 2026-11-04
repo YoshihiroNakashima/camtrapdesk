@@ -11,7 +11,7 @@ from typing import Callable
 
 from ..config import Settings
 from . import ledger as L
-from .hashing import copy_with_hash, hash_file
+from .hashing import CopyCancelled, copy_with_hash, hash_file
 from .roots import resolve_staging_dir
 
 
@@ -108,8 +108,8 @@ class NasSyncer:
         os.makedirs(dst_dir, exist_ok=True)
         done = 0
         for f in files:
-            if self._stop.is_set():
-                return
+            if self._stop.is_set() or self.paused:
+                return   # 一時停止: ここまでに送れたファイルは台帳に残るので、再開すると続きから
             src = os.path.join(src_dir, f.name)
             dst = os.path.join(dst_dir, f.name)
             if not os.path.isfile(src):
@@ -132,7 +132,10 @@ class NasSyncer:
                 self._prog(ing, (base + n) / total)
 
             try:
-                _, h = copy_with_hash(src, dst, prog)
+                _, h = copy_with_hash(src, dst, prog, should_stop=lambda: self.paused or self._stop.is_set())
+            except CopyCancelled:
+                self.on_log(f"[{ing.card_id}] NAS転送を一時停止しました（{f.name} の途中。再開するとこのファイルからやり直します）")
+                return
             except OSError as e:
                 self.on_log(f"[{ing.card_id}] NASへのコピー失敗: {f.name} ({e})。後で再試行します")
                 self.last_error = str(e)
