@@ -1409,3 +1409,52 @@ def test_nas_pause_stops_between_files_and_resumes(env):
     while ledger.pending_nas():
         syncer._tick()
     assert ledger.latest_ingest_for_card("264").status == L.STATUS_SYNCED
+
+
+# ----------------------------------------------------------------------------
+# ffmpeg が固まったときの立て直し
+# ----------------------------------------------------------------------------
+
+def test_stalled_ffmpeg_is_killed_quickly(tmp_path):
+    """出力が増えないまま stall_sec 経ったら止める（10 分の時間切れを待たない）。"""
+    import sys
+    from camtrapdesk.core import ffmpeg as F
+    out = tmp_path / "out.part"
+    out.write_bytes(b"x")
+    cmd = [sys.executable, "-c", "import time; time.sleep(30)"]
+    t0 = time.time()
+    code, _err = F._run_cancellable(cmd, timeout=60, stop=None, watch_path=str(out), stall_sec=1.0)
+    assert code == -3 and time.time() - t0 < 10
+
+
+def test_hardware_encoder_stall_falls_back_to_cpu(tmp_path, monkeypatch):
+    """GPU デコード→GPU エンコードが固まったら、同じファイルを CPU（libx264）でやり直し、固まった回数を覚える。"""
+    import pytest
+    from camtrapdesk.core import ffmpeg as F
+    ff = F.find_ffmpeg()
+    if not ff:
+        pytest.skip("ffmpeg が無い")
+    src = tmp_path / "a.avi"
+    assert make_avi(src)
+    real = F._run_cancellable
+    seen = []
+
+    def fake(args, timeout, stop, watch_path=None, stall_sec=F.STALL_SEC):
+        seen.append(("h264_nvenc" in args, "cuda" in args))
+        if "h264_nvenc" in args:
+            return -3, ""           # 固まった扱い
+        return real(args, timeout, stop, watch_path, stall_sec)
+
+    monkeypatch.setattr(F, "_run_cancellable", fake)
+    monkeypatch.setattr(F, "encoder_timeouts", {})
+    monkeypatch.setattr(F, "_gpu_decode_ok", {})
+    dst = tmp_path / "a.mp4.part"
+    ok, msg = F.convert_to_mp4(ff, str(src), str(dst), "h264_nvenc", 23)
+    assert ok, msg
+    assert msg.startswith("libx264") and "固まった" in msg
+    assert seen == [(True, True), (True, False), (False, False)]   # GPU デコード → CPU デコード → CPU エンコード
+    assert F.encoder_timeouts == {"h264_nvenc": 1} and F._gpu_decode_ok[("h264_nvenc", "mjpeg")] is False
+    assert dst.stat().st_size > 0
+    # 2 回固まったら、変換係はセッションの残りを CPU にする
+    F.encoder_timeouts["h264_nvenc"] = 2
+    assert F.encoder_unreliable("h264_nvenc") and not F.encoder_unreliable("libx264")

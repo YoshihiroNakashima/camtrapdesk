@@ -14,7 +14,7 @@ from typing import Callable
 
 from ..config import Settings
 from . import ledger as L
-from .ffmpeg import convert_to_mp4, detect_encoder, find_ffmpeg
+from .ffmpeg import convert_to_mp4, detect_encoder, encoder_unreliable, find_ffmpeg
 from .hashing import hash_file
 from .roots import resolve_staging_dir
 
@@ -219,6 +219,9 @@ class Converter:
             self.on_log(f"[{ing.card_id}] 変換元が見つかりません: {src}")
             return False
         t0 = time.time()
+        if encoder_unreliable(self.encoder or "libx264"):
+            self.on_log(f"[{ing.card_id}] {self.encoder} が固まるので、以後は CPU（libx264）で変換します")
+            self.encoder = "libx264"
         ok, msg = convert_to_mp4(ffmpeg, src, part, self.encoder or "libx264", int(s.convert_crf), stop=self._interrupt)
         if not ok:
             try:

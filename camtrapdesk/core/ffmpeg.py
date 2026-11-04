@@ -345,8 +345,13 @@ def encoder_report(ffmpeg: str, preferred: str = "auto") -> list[tuple[str, bool
         return list(_encoder_report.get(f"{ffmpeg}|{preferred}", []))
 
 
-def _run_cancellable(args: list[str], timeout: float, stop: "threading.Event | None") -> tuple[int, str]:
-    """ffmpeg を走らせ、stop が立ったら途中で止める。(終了コード, stderr) を返す。中止は -1、時間切れは -2。"""
+STALL_SEC = 90.0   # 出力ファイルがこの秒数まったく増えなければ、ffmpeg が固まったとみなして止める
+
+
+def _run_cancellable(args: list[str], timeout: float, stop: "threading.Event | None",
+                     watch_path: str | None = None, stall_sec: float = STALL_SEC) -> tuple[int, str]:
+    """ffmpeg を走らせ、stop が立ったら途中で止める。(終了コード, stderr) を返す。
+    中止は -1、時間切れは -2、出力が増えずに固まったら -3（watch_path を見張る。GPU デコードが固まる事例があるため）。"""
     import time as _t
     p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                          creationflags=_creationflags())
@@ -355,19 +360,32 @@ def _run_cancellable(args: list[str], timeout: float, stop: "threading.Event | N
     reader = threading.Thread(target=lambda: buf.append(p.stderr.read() if p.stderr else b""), daemon=True)
     reader.start()
     t0 = _t.time()
+    last_size, last_growth = -1, t0
     code: int | None = None
     while code is None:
         try:
             code = p.wait(timeout=0.5)
         except subprocess.TimeoutExpired:
+            now = _t.time()
             if stop is not None and stop.is_set():
                 p.kill()
                 p.wait()
                 code = -1
-            elif _t.time() - t0 > timeout:
+            elif now - t0 > timeout:
                 p.kill()
                 p.wait()
                 code = -2
+            elif watch_path:
+                try:
+                    size = os.path.getsize(watch_path)
+                except OSError:
+                    size = -1
+                if size != last_size:
+                    last_size, last_growth = size, now
+                elif now - last_growth > stall_sec:
+                    p.kill()
+                    p.wait()
+                    code = -3
     reader.join(timeout=5)
     err = b"".join(buf).decode("utf-8", errors="replace")
     return code, err
@@ -375,6 +393,13 @@ def _run_cancellable(args: list[str], timeout: float, stop: "threading.Event | N
 
 # GPU でのデコード（MJPEG → GPU 上で直接エンコード）。使えなければ CPU デコードに戻す。(エンコーダ, 元コーデック) → 使えるか
 _gpu_decode_ok: dict[tuple[str, str], bool] = {}
+# ハードウェアエンコーダが固まった回数（2 回以上なら、変換係はそのセッション中は CPU に切り替える）
+encoder_timeouts: dict[str, int] = {}
+ENCODER_GIVE_UP = 2
+
+
+def encoder_unreliable(encoder: str) -> bool:
+    return encoder != "libx264" and encoder_timeouts.get(encoder, 0) >= ENCODER_GIVE_UP
 
 # 元コーデックごとの GPU デコードの入力オプション（-i の前に置く）
 _GPU_DECODE = {
@@ -422,34 +447,54 @@ def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
     can_gpu = encoder in _GPU_DECODE and info.vcodec in _GPU_DECODE[encoder]
     use_gpu = can_gpu and _gpu_decode_ok.get((encoder, info.vcodec), True)
     timeout = max(600.0, info.duration * 20 + 120)
-    attempts = [use_gpu, False] if use_gpu else [False]
+    # 試す順: GPU デコード＋指定エンコーダ → CPU デコード＋指定エンコーダ → CPU（libx264）。
+    # 固まった・時間切れになったら次へ進む（GPU 側が固まる事例があるため）。
+    attempts: list[tuple[bool, str]] = []
+    if use_gpu:
+        attempts.append((True, encoder))
+    attempts.append((False, encoder))
+    if encoder != "libx264":
+        attempts.append((False, "libx264"))
     code, stderr = 1, ""
-    used_gpu = False
-    for gpu in attempts:
-        args = _build_args(ffmpeg, src, dst, encoder, crf, info, threads, gpu)
+    used_gpu, used_enc = False, encoder
+    notes: list[str] = []
+    for i, (gpu, enc) in enumerate(attempts):
+        args = _build_args(ffmpeg, src, dst, enc, crf, info, threads, gpu)
         try:
-            code, stderr = _run_cancellable(args, timeout, stop)
+            code, stderr = _run_cancellable(args, timeout, stop, watch_path=dst)
         except OSError as e:
             return False, f"ffmpeg を実行できません: {e}"
         if code == -1:
             return False, "中止しました"
-        if code == -2:
-            return False, "変換が時間内に終わりませんでした"
         if code == 0:
-            used_gpu = gpu
+            used_gpu, used_enc = gpu, enc
             if gpu:
                 _gpu_decode_ok[(encoder, info.vcodec)] = True
             break
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+        hung = code in (-2, -3)
         if gpu:
-            # GPU デコードが使えない組み合わせ。以後は CPU デコード＋GPU エンコードにする
+            # GPU デコードが使えない（エラー）か固まった組み合わせ。以後は CPU デコード＋GPU エンコードにする
             _gpu_decode_ok[(encoder, info.vcodec)] = False
-            try:
-                os.remove(dst)
-            except OSError:
-                pass
+            if hung:
+                notes.append("GPU デコードが固まったので CPU デコードでやり直し")
+            continue
+        if hung and enc != "libx264":
+            encoder_timeouts[enc] = encoder_timeouts.get(enc, 0) + 1
+            notes.append(f"{enc} が固まったので CPU（libx264）でやり直し")
+            continue
+        if hung:
+            return False, "変換が時間内に終わりませんでした" + ("（" + "、".join(notes) + "）" if notes else "")
+        if enc != "libx264" and i + 1 < len(attempts):
+            notes.append(f"{enc} がエラーだったので CPU（libx264）でやり直し")
+            continue
+        break
     if code != 0:
         err = stderr.strip().splitlines()
-        return False, "ffmpeg エラー: " + (err[-1] if err else f"code {code}")
+        return False, "ffmpeg エラー: " + (err[-1] if err else f"code {code}") + ("（" + "、".join(notes) + "）" if notes else "")
     if not os.path.isfile(dst) or os.path.getsize(dst) == 0:
         return False, "変換後のファイルが空です"
     out = probe(ffmpeg, dst)
@@ -457,4 +502,4 @@ def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
         return False, "変換後のファイルを読み取れません"
     if info.duration > 0 and abs(out.duration - info.duration) > max(1.0, info.duration * 0.02):
         return False, f"変換後の長さが合いません（元 {info.duration:.1f}s / 変換後 {out.duration:.1f}s）"
-    return True, f"{encoder}" + ("（デコードも GPU）" if used_gpu else "")
+    return True, f"{used_enc}" + ("（デコードも GPU）" if used_gpu else "") + ("。" + "、".join(notes) if notes else "")

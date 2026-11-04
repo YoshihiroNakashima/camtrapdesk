@@ -20,7 +20,7 @@ from typing import Callable
 
 from ..config import Settings
 from . import ledger as L
-from .ffmpeg import convert_to_mp4, detect_encoder, find_ffmpeg, probe
+from .ffmpeg import convert_to_mp4, detect_encoder, encoder_unreliable, find_ffmpeg, probe
 from .hashing import hash_file
 
 PART_SUFFIX = ".part"
@@ -486,6 +486,13 @@ class BatchConverter:
         self.on_status(f"{st.n_done}/{st.n_total} ファイル（{fmt_bytes(st.bytes_in_done)}/{fmt_bytes(st.bytes_total)}、"
                        f"{saved}{eta_s}）" + (f"　変換中: {cur}" if cur else ""))
 
+    def _maybe_fall_back_to_cpu(self) -> None:
+        """ハードウェアエンコーダが何度も固まったら、このセッションの残りは CPU（libx264）で変換する。"""
+        enc = self.encoder or "libx264"
+        if encoder_unreliable(enc):
+            self.encoder = "libx264"
+            self.on_log(f"{enc} が固まるので、以後は CPU（libx264）で変換します（時間はかかりますが止まりません）")
+
     def _convert_one(self, fp: FolderPlan, t: Target, ffmpeg: str) -> tuple[int, str | None] | None:
         """1 ファイルを変換して元を消す。(変換後サイズ, ハッシュ) を返す。失敗は None（元はそのまま）。"""
         src = os.path.join(fp.dir, t.name)
@@ -528,6 +535,7 @@ class BatchConverter:
         if not self._wait_for_space(dest_dir, t.size + 256 * 1024 * 1024):
             return None
         t0 = time.time()
+        self._maybe_fall_back_to_cpu()
         ok, msg = convert_to_mp4(ffmpeg, src, part, self.encoder or "libx264", self._crf, stop=self._stop)
         if not ok:
             try:
