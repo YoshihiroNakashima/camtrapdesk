@@ -74,6 +74,7 @@ class MediaFile:
     name: str         # ファイル名
     size: int
     mtime: float
+    error: str = ""   # カード上で読めない（壊れている）ときの理由。コピーせず、壊れたファイルとして記録だけする
 
     @property
     def dest_name(self) -> str:
@@ -106,6 +107,7 @@ def list_media_files(volume: Volume, media_subdirs: list[str], extensions: list[
     problems: list[str] = []
     warnings: list[str] = []
     small = 0
+    unreadable = 0
     found_dir = False
     # 設定のフォルダが1つも無いカードは、DCIM 以下をまとめて探す（カメラの機種が違っても動くように）
     def _parts(sub: str) -> list[str]:
@@ -128,7 +130,8 @@ def list_media_files(volume: Volume, media_subdirs: list[str], extensions: list[
             try:
                 names = sorted(os.listdir(base))
             except OSError as e:
-                problems.append(f"フォルダを読めません: {sub} ({e})")
+                problems.append(f"フォルダを読めません: {sub} ({e.strerror or e})。カードが壊れている疑いがあります。"
+                                "「カードを修復（chkdsk）」をしてからやり直してください")
                 continue
             walker = [(base, [], names)]
         for dirpath, _dirs, names in walker:
@@ -142,7 +145,11 @@ def list_media_files(volume: Volume, media_subdirs: list[str], extensions: list[
                 try:
                     st = os.stat(p)
                 except OSError as e:
-                    problems.append(f"読めないファイル: {n} ({e})")
+                    # 壊れていて読めないファイル（「ファイルまたはディレクトリが壊れている」など）。
+                    # カード全体は止めず、このファイルだけ「壊れている」として記録し、コピーしない
+                    unreadable += 1
+                    files.append(MediaFile(src_path=p, rel_dir=rel_dir, name=n, size=0, mtime=0.0,
+                                           error=f"カード上で読めません（{e.strerror or e}）"))
                     continue
                 if not os.path.isfile(p):
                     continue
@@ -159,6 +166,8 @@ def list_media_files(volume: Volume, media_subdirs: list[str], extensions: list[
         seen[f.name] = f.rel_dir
     if small:
         warnings.append(f"{min_size}B未満の小さいファイルが{small}件")
+    if unreadable:
+        warnings.append(f"読めない（壊れた）ファイルが{unreadable}件。コピーせず記録だけ残し、取り込み後に修復できます")
     return files, problems, warnings
 
 

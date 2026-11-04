@@ -75,6 +75,8 @@ class CardJob:
     total_bytes: int = 0
     done_files: int = 0
     ingest_id: int | None = None
+    n_broken: int = 0            # 壊れていた（読めなかった／途中で切れていた）ファイル数
+    repair_offered: bool = False # 一括完了時に修復を勧めたか（同じカードに二度聞かない）
     started: float = field(default_factory=time.time)
     copy_started: float | None = None
     finished: float | None = None
@@ -119,6 +121,7 @@ class IngestManager:
         self._batch_counted = True
         self._skipped_reported: set[str] = set()   # id.txt が無い等で対象外にしたボリューム（1回だけ記録）
         IngestManager._instances.add(self)
+        self.scan_paused = False                           # カードの修復（chkdsk）中は走査を止める
         self.others: dict[str, tuple[Volume, str]] = {}   # カードとして扱えないリムーバブルボリュームと理由
         self.suggested_ids: dict[str, str] = {}           # id.txt の無いボリューム → 前回の ID（ボリュームシリアルから）
         self._remembered: set[tuple[str, str]] = set()    # 今回の起動で台帳に書いた (シリアル, ID)
@@ -199,7 +202,8 @@ class IngestManager:
     def _poll_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self._scan_once()
+                if not self.scan_paused:
+                    self._scan_once()
             except Exception as e:  # pragma: no cover
                 self.on_log(f"スキャンでエラー: {e}")
             self._stop.wait(max(0.5, float(self.get_settings().poll_interval_sec)))
@@ -462,6 +466,13 @@ class IngestManager:
             if self._stop.is_set():
                 raise RuntimeError("停止されました")
             dst = os.path.join(dest_dir, f.name)
+            if f.error:
+                # 検出の時点でカード上で読めなかったファイル: コピーせず、壊れたものとして記録だけ残す
+                broken.append((f.name, f.error))
+                self.ledger.set_file_broken(ingest_id, f.name, f.error)
+                self.on_log(f"[{cid}] {f.name}: {f.error}。飛ばして続けます")
+                job.done_files = i
+                continue
             # 再開: 既に検証済みのファイルは、読み戻してハッシュが一致すれば飛ばす
             if f.name in existing_hashes and os.path.isfile(dst) and os.path.getsize(dst) == f.size:
                 size_, h = existing_hashes[f.name]
@@ -482,7 +493,7 @@ class IngestManager:
             except OSError as e:
                 if e.errno == errno.ENOSPC:
                     raise NoSpaceError("保存先がいっぱいになりました") from e
-                if s.broken_check and _is_source_read_error(e, f.src_path):
+                if _is_source_read_error(e, f.src_path):
                     # カード上で壊れていて読めないファイル: このファイルだけ諦めて先へ進む（カード全体は止めない）
                     _remove_quietly(dst + ".part")
                     reason = f"カードから読めません（{e.strerror or e}）"
@@ -517,6 +528,7 @@ class IngestManager:
         ts = L.now_iso()
         broken_names = {n for n, _r in broken}
         good_files = [f for f in card.files if f.name not in broken_names]
+        job.n_broken = len(broken)
         # 変換（AVI → mp4）が有効なら、対象ファイル数を記録しておく。NAS 転送は変換が終わってから
         n_convert = 0
         if s.convert_enabled:
@@ -535,8 +547,10 @@ class IngestManager:
         nas_note = "。" + "と".join(notes) + "はバックグラウンドで続きます" if notes else ""
         broken_note = ""
         if broken:
+            n_unread = sum(1 for _n, r in broken if r.startswith("カード"))   # カード上で読めなかったもの
             where = "中継から消しました" if s.broken_action != "keep" else "_破損 フォルダに移しました"
-            broken_note = f"。壊れていた {len(broken)} ファイルは{where}（カードを消すときに一緒に消えます）"
+            broken_note = f"。壊れていた {len(broken)} ファイルは{where}（カードを消すときに一緒に消えます"
+            broken_note += "。読めないファイルがあったので、取り込みが終わったらカードの修復をおすすめします）" if n_unread else "）"
         self._set(job, S_DONE, f"完了: {len(good_files)}ファイル検証済み{broken_note}{nas_note}")
         self.on_log(f"[{cid}] 完了（{len(good_files)}ファイル, {card.total_bytes/1e9:.2f} GB"
                     + (f"、壊れたファイル {len(broken)} 件" if broken else "") + "）")
@@ -575,11 +589,11 @@ class IngestManager:
 
 def _is_source_read_error(e: OSError, src_path: str) -> bool:
     """コピー中の OSError が、カード側（読み取り）で起きたものか。"""
+    from .repair import is_corruption_error
     fn = getattr(e, "filename", None) or ""
     if fn and os.path.normcase(os.path.abspath(fn)) == os.path.normcase(os.path.abspath(src_path)):
         return True
-    win = getattr(e, "winerror", None)
-    return e.errno == errno.EIO or win in (23, 1117, 1392)   # Windows: CRC エラー / I/O デバイスエラー / 破損
+    return is_corruption_error(e)
 
 
 def _remove_quietly(path: str) -> None:

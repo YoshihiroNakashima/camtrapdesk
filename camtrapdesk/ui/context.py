@@ -12,6 +12,7 @@ from ..core.convert import Converter
 from ..core.ingest import CardJob, IngestManager
 from ..core.ledger import Ledger
 from ..core.nas_sync import NasSyncer
+from ..core.repair import ScanDialogDismisser
 
 
 class AppContext(QObject):
@@ -26,6 +27,7 @@ class AppContext(QObject):
     batch_log = Signal(str)
     batch_done = Signal(object)         # BatchStats
     settings_changed = Signal()
+    repair_status = Signal(str)         # カードの修復（chkdsk）の状況
 
     def __init__(self):
         super().__init__()
@@ -49,6 +51,9 @@ class AppContext(QObject):
                                     on_status=self.batch_status.emit,
                                     on_log=self.batch_log.emit,
                                     on_done=self.batch_done.emit)
+        # Windows の「スキャンして修復しますか」を自動で「スキャンせずに続行」にする（取り込みは止まらない）
+        self.dismisser = ScanDialogDismisser(on_log=self.log_message.emit)
+        self.dismisser.enabled = self.settings.auto_dismiss_scan_dialog
         # 取り込みが1枚終わるたびに変換係と NAS 転送係を起こす（待ち時間なしで始める）
         self.job_updated.connect(self._maybe_wake_nas)
         self._dest_sig = self._destination_signature()
@@ -71,6 +76,7 @@ class AppContext(QObject):
         """設定をすぐファイルに書く（各画面は値を変えたらそのまま呼ぶ。「保存」ボタンは無い）。"""
         save_settings(self.settings)
         self._apply_match_mode()
+        self.dismisser.enabled = self.settings.auto_dismiss_scan_dialog
         self.converter.encoder = None   # エンコーダの指定が変わったかもしれないので選び直す
         self.converter.wake()
         sig = self._destination_signature()
@@ -92,8 +98,10 @@ class AppContext(QObject):
         self.ingest.start()
         self.converter.start()
         self.nas.start()
+        self.dismisser.start()
 
     def stop_background(self) -> None:
+        self.dismisser.stop()
         self.ingest.stop()
         self.converter.stop()
         self.nas.stop()

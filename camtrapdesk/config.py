@@ -65,6 +65,8 @@ class Settings:
     # --- 壊れたファイル（電圧低下などで途中までしか書けなかった動画。Windows の「スキャンして修復」が出るカード） ---
     broken_check: bool = True            # コピー後に中継の上で動画・画像が壊れていないか調べる
     broken_action: str = "delete"        # delete: 中継から消す / keep: カードフォルダ内の _破損 に移して残す（NAS には送らない）
+    auto_dismiss_scan_dialog: bool = True   # Windows の「スキャンして修復しますか」を自動で「スキャンせずに続行」にする
+    repair_after_ingest: bool = True        # 取り込みの一括が終わったとき、読めないファイルのあったカードの修復（chkdsk）を提案する
     # --- 野帳 ---
     fieldnote_path: str = field(default_factory=_default_fieldnote_path)
     fieldnote_sheet: str = ""      # 空なら最初のシート

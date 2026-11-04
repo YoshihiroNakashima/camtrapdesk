@@ -1170,3 +1170,88 @@ def test_installation_cross_check(tmp_path):
     m3 = build_mapping(fn, [("Season", "260710")], s)
     res3 = cross_check_installation(m3, fn, [("Season", "999999")], s)
     assert res3.n_install_rows == 0 and any("条件に合う行がありません" in x for x in m3.issues)
+
+
+# ----------------------------------------------------------------------------
+# カード上で読めないファイル（「ファイルまたはディレクトリが壊れている」）と修復
+# ----------------------------------------------------------------------------
+
+def test_unreadable_file_on_card_is_skipped_not_fatal(env, monkeypatch):
+    """コピー中にカード側の読み取りエラー（EIO）が出ても、そのファイルだけ壊れた扱いにしてカードの残りは取り込む。"""
+    import errno
+    from camtrapdesk.core import ingest as ING
+    s, ledger = env["settings"], env["ledger"]
+    make_card(env["cards"], "264", n_files=3)
+    real = ING.copy_with_hash
+
+    def flaky(src, dst, progress=None):
+        if src.endswith("IMG_0001.MP4"):
+            raise OSError(errno.EIO, "ファイルまたはディレクトリが壊れているため、読み取ることができません")
+        return real(src, dst, progress)
+
+    monkeypatch.setattr(ING, "copy_with_hash", flaky)
+    mgr, logs = run_ingest(env)
+    job = next(iter(mgr.jobs.values()))
+    assert job.state == S_DONE and job.n_broken == 1, (job.message, logs)
+    assert "修復をおすすめ" in job.message
+    ing = ledger.latest_ingest_for_card("264")
+    recs = {f.name: f for f in ledger.files_for(ing.id)}
+    assert recs["IMG_0001.MP4"].broken and "読めません" in recs["IMG_0001.MP4"].broken
+    assert recs["IMG_0000.MP4"].staging_ok and recs["IMG_0002.MP4"].staging_ok
+    d = env["dest"] / "N260710" / "264"
+    assert sorted(os.listdir(d)) == ["IMG_0000.MP4", "IMG_0002.MP4", "manifest.json"]
+    assert not list(d.glob("*.part"))
+
+
+def test_unreadable_file_at_detection_is_recorded(env, monkeypatch):
+    """検出の時点で stat できないファイルは、カード全体のエラーにせず、壊れたファイルとして記録だけ残す。"""
+    import errno
+    from camtrapdesk.core import cards as C
+    s, ledger = env["settings"], env["ledger"]
+    make_card(env["cards"], "264", n_files=3)
+    real_stat = os.stat
+
+    def bad_stat(p, *a, **k):
+        if str(p).endswith("IMG_0002.MP4"):
+            raise OSError(errno.EIO, "ファイルまたはディレクトリが壊れているため、読み取ることができません")
+        return real_stat(p, *a, **k)
+
+    monkeypatch.setattr(C.os, "stat", bad_stat)
+    vols = list_volumes(scan_roots=[str(env["cards"])])
+    card = detect_cards(vols, "id.txt", ["DCIM/100_BTCF"], ["mp4"], False, 1024)[0]
+    assert not card.problems and any("読めない" in w for w in card.warnings)
+    assert [f.name for f in card.files if f.error] == ["IMG_0002.MP4"]
+    mgr, logs = run_ingest(env)
+    job = next(iter(mgr.jobs.values()))
+    assert job.state == S_DONE and job.n_broken == 1, (job.message, logs)
+    ing = ledger.latest_ingest_for_card("264")
+    assert {f.name: bool(f.broken) for f in ledger.files_for(ing.id)} == {"IMG_0000.MP4": False, "IMG_0001.MP4": False, "IMG_0002.MP4": True}
+    assert sorted(os.listdir(env["dest"] / "N260710" / "264")) == ["IMG_0000.MP4", "IMG_0001.MP4", "manifest.json"]
+    # 削除判定では、読めなかったファイルも削除対象（保存先には無い）
+    monkeypatch.undo()
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    while ledger.pending_nas():
+        syncer._tick()
+    vols = list_volumes(scan_roots=[str(env["cards"])])
+    card = detect_cards(vols, "id.txt", ["DCIM/100_BTCF"], ["mp4"], False, 1024)[0]
+    v = check_card(card, ledger, s)
+    assert v.ok and sorted(v.deletable) == ["IMG_0000.MP4", "IMG_0001.MP4", "IMG_0002.MP4"] and v.broken == ["IMG_0002.MP4"]
+
+
+def test_repair_helpers(tmp_path):
+    from camtrapdesk.core.repair import build_repair_script, chkdsk_target, is_corruption_error, summarize_repair_log
+    from camtrapdesk.core.volumes import Volume
+    import errno
+    v1 = Volume(key="\\\\?\\Volume{abc}\\", root="F:\\", display="F:", label="SD1", kind="removable")
+    v2 = Volume(key="\\\\?\\Volume{def}\\", root="\\\\?\\Volume{def}\\", display="(レター無し)", label="SD2", kind="removable")
+    assert chkdsk_target(v1) == "F:" and chkdsk_target(v2) == "\\\\?\\Volume{def}\\"
+    script = build_repair_script(["F:", "\\\\?\\Volume{def}\\"], "C:\\x\\repair.log", "C:\\x\\repair.done")
+    assert 'chkdsk "F:" /f /x' in script and 'chkdsk "\\\\?\\Volume{def}\\" /f /x' in script
+    assert script.count("=== chkdsk") == 2 and "repair.done" in script and "\r\n" in script
+    assert is_corruption_error(OSError(errno.EIO, "x"))
+    e = OSError(22, "x"); e.winerror = 1392
+    assert is_corruption_error(e)
+    assert not is_corruption_error(OSError(errno.ENOENT, "x")) and not is_corruption_error(ValueError())
+    log = "camtrapdesk repair\n\n=== chkdsk F: ===\nファイル システムの種類は FAT32 です。\nWindows はファイル システムを検査し、問題を修復しました。\n[exit 0]\n"
+    s = summarize_repair_log(log)
+    assert "F:: Windows はファイル システムを検査し、問題を修復しました。" in s and "F:: [exit 0]" in s

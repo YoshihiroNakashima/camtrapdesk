@@ -47,9 +47,12 @@ class ClearPage(QWidget):
         self.delete_btn.clicked.connect(self.delete_all)
         self.check_btn = QPushButton("照合し直す")
         self.check_btn.clicked.connect(lambda: self.check(then_delete=False))
+        self.repair_btn = QPushButton("カードを修復（chkdsk）…")
+        self.repair_btn.setToolTip("壊れていて消せないファイルがあるカードを Windows の chkdsk で修復します")
+        self.repair_btn.clicked.connect(self._open_repair)
         self.hash_chk = QCheckBox("ハッシュも再計算して照合（時間がかかります）")
         self.offline_chk = QCheckBox("保存先に接続できないときも台帳の記録だけで許可する")
-        for w in (self.delete_btn, self.check_btn, self.hash_chk, self.offline_chk):
+        for w in (self.delete_btn, self.check_btn, self.repair_btn, self.hash_chk, self.offline_chk):
             ops.addWidget(w)
         ops.addStretch(1)
         self.summary_label = QLabel("")
@@ -226,7 +229,8 @@ class ClearPage(QWidget):
         # 結果をはっきり知らせる（消していないカードがあれば、その理由も）
         lines = [f"{len(targets)} 枚から {total} ファイルを削除しました。"]
         if failed:
-            lines.append(f"削除でエラーになったカード: {', '.join(failed)}（ログを確認）")
+            lines.append(f"削除でエラーになったカード: {', '.join(failed)}（ログを確認）。"
+                         "「ファイルまたはディレクトリが壊れている」なら「カードを修復（chkdsk）…」で直してからもう一度消してください")
         if others:
             lines.append("")
             lines.append(f"消していないカード {len(others)} 枚:")
@@ -241,6 +245,11 @@ class ClearPage(QWidget):
             lines.append(pend)
         QMessageBox.information(self, "削除の結果", "\n".join(lines))
         self.check(then_delete=False)
+
+    def _open_repair(self) -> None:
+        from ..repair_dialog import RepairDialog
+        pre = {v.card.volume.key for v in self.verdicts if not v.ok and any("壊れて" in r or "エラー" in r for r in v.reasons)}
+        RepairDialog(self.ctx, self, preselect=pre or None).exec()
 
     # ---------------------------------------------------------- 消し忘れ
     def refresh_folders(self) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 
 from PySide6.QtCore import QTimer, Qt
@@ -63,7 +64,10 @@ class IngestPage(QWidget):
         self.diag_btn = QPushButton("診断")
         self.diag_btn.setToolTip("Windows が認識している全ボリュームと id.txt の状態を一覧にします")
         self.diag_btn.clicked.connect(self._diagnostics)
-        for w in (self.arm_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.diag_btn):
+        self.repair_btn = QPushButton("カードを修復（chkdsk）…")
+        self.repair_btn.setToolTip("壊れたファイルのあったカードや「読めません」のカードを、取り込みが終わってから Windows の chkdsk でまとめて修復します")
+        self.repair_btn.clicked.connect(lambda: self.open_repair())
+        for w in (self.arm_btn, self.start_btn, self.rescan_btn, self.clear_btn, self.diag_btn, self.repair_btn):
             ops.addWidget(w)
         ops.addStretch(1)
         self.summary_label = QLabel("")
@@ -286,6 +290,23 @@ class IngestPage(QWidget):
         win = self.window()
         if hasattr(win, "notify"):
             win.notify("取り込み完了", f"{n}枚のカードが完了しました。入れ替えてください。")
+        # 読めないファイルのあったカードは、いまのうちに修復を勧める（データは取り込み済みなので安全）
+        broken = [j for j in self.ctx.ingest.jobs.values() if j.state == I.S_DONE and j.n_broken and not getattr(j, "repair_offered", False)]
+        if broken and self.ctx.settings.repair_after_ingest and sys.platform == "win32":
+            for j in broken:
+                j.repair_offered = True
+            ids = ", ".join(j.card.card_id for j in broken[:10]) + ("…" if len(broken) > 10 else "")
+            msg = (f"{len(broken)} 枚のカードに壊れたファイルがありました（{ids}）。\n"
+                   "データは取り込み済みです。いまこれらのカードを Windows の chkdsk で修復しますか？\n"
+                   "（管理者の許可を求める画面が 1 回出ます。あとで「カードを修復（chkdsk）…」からもできます）")
+            if QMessageBox.question(self, "カードの修復", msg) == QMessageBox.StandardButton.Yes:
+                self.open_repair({j.card.volume.key for j in broken})
+
+    def open_repair(self, preselect: set[str] | None = None) -> None:
+        from ..repair_dialog import RepairDialog
+        if self.ctx.ingest.active_count():
+            QMessageBox.information(self, "カードを修復", "コピー中のカードがあります。取り込みが終わってから修復してください（終わったカードだけ選べます）。")
+        RepairDialog(self.ctx, self, preselect=preselect).exec()
 
     def _on_convert_status(self, msg: str) -> None:
         self.convert_status.setText(msg)
