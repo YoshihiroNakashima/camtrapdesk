@@ -25,7 +25,7 @@ class Converter:
                  on_ingest_done: Callable[[int], None] | None = None):
         self.get_settings = get_settings
         self.ledger = ledger
-        self.on_status = on_status
+        self._on_status = on_status
         self.on_log = on_log
         self.on_ingest_done = on_ingest_done
         self._stop = threading.Event()
@@ -33,9 +33,14 @@ class Converter:
         self._thread: threading.Thread | None = None
         self.paused = False
         self.current: str | None = None       # 変換中の "season/dir"
+        self.last_status: str = ""            # 最後に on_status へ出した文（画面の確認用）
         self.encoder: str | None = None
         self._failed: set[tuple[int, str]] = set()   # (ingest_id, name) 起動中は再試行しない
         self._reported_missing = False
+
+    def on_status(self, msg: str) -> None:
+        self.last_status = msg
+        self._on_status(msg)
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -52,7 +57,8 @@ class Converter:
         self._wake.set()
 
     def busy(self) -> bool:
-        return self.current is not None
+        """いま実際に変換しているか（スレッドが生きていて、カードを処理中）。"""
+        return self.current is not None and bool(self._thread and self._thread.is_alive())
 
     # ------------------------------------------------------------------
     def _loop(self) -> None:

@@ -263,8 +263,13 @@ class BatchConvertPage(QWidget):
             return
         if self.ctx.batch.running:
             return
-        if self.ctx.converter.busy():
-            QMessageBox.information(self, "変換中", "取り込み時の変換が動いています。終わってから始めてください。")
+        if self.ctx.settings.convert_enabled and self.ctx.converter.busy():
+            cur = self.ctx.converter.current or ""
+            st = self.ctx.converter.last_status or ""
+            QMessageBox.information(self, "変換中",
+                                    f"取り込んだカードの mp4 への変換が裏で動いています（{cur}）。\n{st}\n\n"
+                                    "終わってから始めてください（取り込み画面の「裏で続く処理」で進み具合が分かります。"
+                                    "取り込み画面の「動画の変換」を外すと、残りは元のまま NAS へ送って止まります）。")
             return
         if plan.in_place:
             how = "変換した mp4 を同じフォルダに置き、元のファイルは消します。この操作は元に戻せません。"
