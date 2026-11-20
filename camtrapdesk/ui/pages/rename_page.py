@@ -195,18 +195,27 @@ class RenamePage(QWidget):
         cond_box.addWidget(hint)
         form.addRow("使う行の絞り込み", cond_box)
 
-        # 変更するフォルダ
+        # 変更するフォルダ: パスを直接指定できる（いつでも、どこにあるものでも）。保存先・NAS の区切りフォルダは候補から選べる
+        fbox = QVBoxLayout()
+        self.folder_row = PathRow("", mode="dir", placeholder=r"カードIDのフォルダが並んでいるフォルダ（例: D:\CamTrap\N260710、\\DS2422\camtrap\N250410）")
+        self.folder_row.setToolTip("この中にある カードID の名前のフォルダを地点名に変えます。過去の調査回のフォルダや、別の場所にコピーしたものも指定できます")
+        self.folder_row.changed.connect(self._folder_edited)
+        fbox.addWidget(self.folder_row)
         h4 = QHBoxLayout()
         self.folder_combo = QComboBox()
         self.folder_combo.setMinimumWidth(220)
-        self.folder_combo.setToolTip("保存先（中継）と NAS にある区切りフォルダ（調査回や調査地）の一覧。通常は取り込み画面で指定した今回のフォルダ")
-        self.folder_refresh = QPushButton("一覧を更新")
+        self.folder_combo.setToolTip("保存先（中継）と NAS にある区切りフォルダ（調査回や調査地）の一覧から選ぶと上の欄に入ります")
+        self.folder_combo.currentIndexChanged.connect(self._folder_picked)
+        self.folder_refresh = QPushButton("候補を更新")
         self.folder_refresh.clicked.connect(self.refresh_folders)
+        self.folder_note = QLabel("")
+        self.folder_note.setWordWrap(True)
+        h4.addWidget(QLabel("候補"))
         h4.addWidget(self.folder_combo)
         h4.addWidget(self.folder_refresh)
-        h4.addWidget(QLabel("（この中のカードIDのフォルダを地点名にします。保存先とNASの両方を見て、ある方を変更）"))
-        h4.addStretch(1)
-        form.addRow("変更するフォルダ", h4)
+        h4.addWidget(self.folder_note, 1)
+        fbox.addLayout(h4)
+        form.addRow("変更するフォルダ", fbox)
 
         # 実行
         h3 = QHBoxLayout()
@@ -357,7 +366,7 @@ class RenamePage(QWidget):
                 self.conds.add(fn.resolve_column(c) or c, v)
             return
         season_col = fn.resolve_column("Season")
-        folder = (self._folder() or self.ctx.settings.season_folder).strip()
+        folder = (os.path.basename(os.path.normpath(self._folder())) if self._folder() else self.ctx.settings.season_folder).strip()
         if season_col and folder:
             for v in fn.distinct(season_col):
                 if v and (v == folder or folder.endswith(v) or v.endswith(folder)):
@@ -432,39 +441,76 @@ class RenamePage(QWidget):
 
     # --------------------------------------------------------------- フォルダ
     def refresh_folders(self) -> None:
-        """保存先と NAS にある区切りフォルダを一覧にし、取り込み画面で指定中のものを選ぶ。"""
+        """保存先と NAS にある区切りフォルダを候補にし、まだ何も指定していなければ取り込み画面のフォルダを入れる。"""
         s = self.ctx.settings
-        names: set[str] = set()
-        for root in (s.dest_root, s.nas_root):
-            if root and os.path.isdir(root):
-                try:
-                    for n in os.listdir(root):
-                        p = os.path.join(root, n)
-                        if os.path.isdir(p) and not n.startswith(".") and not os.path.isfile(os.path.join(p, "manifest.json")):
-                            names.add(n)
-                except OSError:
-                    pass
-        cur = s.season_folder.strip()
-        if cur:
-            names.add(cur)
-        prev = self.folder_combo.currentData()
+        cands: list[tuple[str, str]] = []   # (表示, パス)
+        seen: set[str] = set()
+        for root, label in ((s.dest_root, "保存先"), (s.nas_root, "NAS")):
+            if not root or not os.path.isdir(root):
+                continue
+            names: list[str] = []
+            try:
+                for n in os.listdir(root):
+                    p = os.path.join(root, n)
+                    if os.path.isdir(p) and not n.startswith(".") and not os.path.isfile(os.path.join(p, "manifest.json")):
+                        names.append(n)
+            except OSError:
+                pass
+            for n in [""] + sorted(names, reverse=True):
+                path = os.path.join(root, n) if n else root
+                key = os.path.normcase(os.path.abspath(path))
+                if key in seen:
+                    continue
+                seen.add(key)
+                cands.append((f"{label}: {n or '（直下）'}", path))
         self.folder_combo.blockSignals(True)
         self.folder_combo.clear()
-        self.folder_combo.addItem("（保存先の直下）", "")
-        for n in sorted(names, reverse=True):
-            self.folder_combo.addItem(n, n)
-        want = prev if prev else cur
-        idx = self.folder_combo.findData(want)
-        self.folder_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.folder_combo.addItem("（候補から選ぶ）", "")
+        for text, path in cands:
+            self.folder_combo.addItem(text, path)
+        self.folder_combo.setCurrentIndex(0)
         self.folder_combo.blockSignals(False)
+        if not self.folder_row.text():
+            root = s.dest_root or s.nas_root
+            if root:
+                self.folder_row.setText(os.path.join(root, s.season_folder.strip()) if s.season_folder.strip() else root)
+        self._update_folder_note()
+
+    def _folder_picked(self, _i: int) -> None:
+        path = self.folder_combo.currentData()
+        if path:
+            self.folder_row.setText(path)
+            self._update_folder_note()
+
+    def _folder_edited(self, _p: str) -> None:
+        self._update_folder_note()
+        self.apply_btn.setEnabled(False)
 
     def _folder(self) -> str:
-        d = self.folder_combo.currentData()
-        return d if d is not None else ""
+        return self.folder_row.text()
 
-    def _root(self) -> tuple[str, str | None]:
+    def _pair(self) -> tuple[str | None, str, str]:
+        """指定したフォルダと対になる場所（中継 ⇔ NAS の同じ相対位置）。"""
         s = self.ctx.settings
-        return s.dest_root, (s.nas_root or None)
+        return R.counterpart_dir(self._folder(), s.dest_root or None, s.nas_root or None)
+
+    def _update_folder_note(self) -> None:
+        folder = self._folder()
+        if not folder:
+            self.folder_note.setText("")
+            return
+        if not os.path.isdir(folder):
+            self.folder_note.setText("フォルダが見つかりません")
+            self.folder_note.setStyleSheet("color: #b00;")
+            return
+        self.folder_note.setStyleSheet("")
+        other, label, other_label = self._pair()
+        if other:
+            self.folder_note.setText(f"{label}のフォルダ。{other_label}側の同じ場所（{other}）も一緒に変えます")
+        elif other_label:
+            self.folder_note.setText(f"{label}のフォルダ（{other_label}側に同じ場所は無いのでここだけ変えます）")
+        else:
+            self.folder_note.setText("保存先・NAS 以外の場所。ここだけ変えます")
 
     # ------------------------------------------------------------------ 実行
     def dry_run(self) -> None:
@@ -473,9 +519,13 @@ class RenamePage(QWidget):
             if not self.fieldnote:
                 return
         conds = self.conditions()
-        root, nas_root = self._root()
-        if not root and not nas_root:
-            QMessageBox.warning(self, "フォルダ", "変更するフォルダの場所（保存先かNAS）が設定されていません。「1. 取り込み」画面で指定してください。")
+        folder = self._folder()
+        if not folder:
+            QMessageBox.warning(self, "フォルダ", "変更するフォルダ（カードIDのフォルダが並んでいる場所）を指定してください。")
+            self.folder_row.edit.setFocus()
+            return
+        if not os.path.isdir(folder):
+            QMessageBox.warning(self, "フォルダ", f"フォルダが見つかりません:\n{folder}")
             return
         s = self.ctx.settings
         saved = [list(c) for c in conds]
@@ -483,7 +533,8 @@ class RenamePage(QWidget):
         if saved != s.rename_filters:
             s.rename_filters = saved
             changed = True
-        mapping = build_mapping(self.fieldnote, conds, s, season_folder=self._folder())
+        season_folder = R.season_folder_of(folder, s.dest_root or None, s.nas_root or None)
+        mapping = build_mapping(self.fieldnote, conds, s, season_folder=season_folder)
         check_text = ""
         if self.install_chk.isChecked():
             if self.install_fn is None:
@@ -500,7 +551,9 @@ class RenamePage(QWidget):
                 mapping.issues.append("設置記録を読み込めていないので照合していません")
         if changed:
             self.ctx.save()
-        plan = R.build_plan(root, nas_root, mapping, self.ctx.ledger)
+        other, label, other_label = self._pair()
+        plan = R.build_plan_for_dir(folder, other, mapping, self.ctx.ledger, season_folder=season_folder,
+                                    primary_label=label, secondary_label=other_label or "対")
         self.plan = plan
         self._show_plan(plan, mapping.condition_text, check_text)
         self.apply_btn.setEnabled(plan.count(R.A_RENAME) > 0)
@@ -512,7 +565,7 @@ class RenamePage(QWidget):
         with refill_sorted(self.table):
             self._fill_rows(items)
         lines = [f"使う行: {cond_text}" if cond_text else "",
-                 f"変更するフォルダ: {plan.season_dir}" + (f"　／　NAS: {plan.nas_season_dir}" if plan.nas_season_dir else ""),
+                 f"変更するフォルダ: {plan.primary_dir}" + (f"　／　{plan.secondary_label}側: {plan.secondary_dir}" if plan.secondary_dir else ""),
                  f"変更 {plan.count(R.A_RENAME)} / 保留 {plan.count(R.A_BLOCKED)} / 変更先が既存 {plan.count(R.A_TARGET_EXISTS)}"
                  f" / NAS転送中 {plan.count(R.A_SYNCING)} / フォルダ無し {plan.count(R.A_MISSING)}"
                  f" / 野帳に無い {plan.count(R.A_UNMAPPED)} / 変更済み {plan.count(R.A_ALREADY)}"]

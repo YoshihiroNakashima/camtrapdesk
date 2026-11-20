@@ -68,6 +68,10 @@ class Settings:
     auto_dismiss_scan_dialog: bool = True   # Windows の「スキャンして修復しますか」を自動で「スキャンせずに続行」にする
     repair_after_ingest: bool = True        # 取り込みの一括が終わったとき、読めないファイルのあったカードの修復（chkdsk）を提案する
     suppress_toasts_while_ingesting: bool = True   # 「取り込みを開始」から止めるまで、Windows の通知ポップアップ（右下）を止める
+    # --- カードを消す ---
+    clear_mode: str = "ledger"           # ledger: 台帳と照合 / folder: 指定したフォルダの中身と照合（過去のカードなど）
+    clear_folder: str = ""               # folder のときの動画の場所
+    clear_accept_converted: bool = False # manifest の無いフォルダで、同じ名前の mp4 があれば変換済みとみなす
     # --- 野帳 ---
     fieldnote_path: str = field(default_factory=_default_fieldnote_path)
     fieldnote_sheet: str = ""      # 空なら最初のシート

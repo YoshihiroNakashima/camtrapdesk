@@ -1458,3 +1458,122 @@ def test_hardware_encoder_stall_falls_back_to_cpu(tmp_path, monkeypatch):
     # 2 回固まったら、変換係はセッションの残りを CPU にする
     F.encoder_timeouts["h264_nvenc"] = 2
     assert F.encoder_unreliable("h264_nvenc") and not F.encoder_unreliable("libx264")
+
+
+# ----------------------------------------------------------------------------
+# 地点名の変更: フォルダを直接指定 / カードを消す: 指定したフォルダと照合
+# ----------------------------------------------------------------------------
+
+def test_rename_any_folder_directly(tmp_path):
+    """保存先や NAS でない場所にあるフォルダでも、カードIDのフォルダを地点名に変えられる。対になる場所があれば一緒に変える。"""
+    from camtrapdesk.core import rename as R
+    s = nakashima_settings()
+    fn_path = tmp_path / "fieldnote.xlsx"
+    make_fieldnote(fn_path, [{"season": 260710, "station": 482, "inst": 260, "ret": 319},
+                             {"season": 260710, "station": 592, "inst": 74, "ret": 318}])
+    fn = load_fieldnote(str(fn_path), s)
+    m = build_mapping(fn, [("Season", "260710")], s, season_folder="old")
+    # どこか別の場所（過去にコピーしたもの）。台帳には無い
+    folder = tmp_path / "archive" / "N250410"
+    for cid in ("319", "318", "777"):
+        (folder / cid).mkdir(parents=True)
+        (folder / cid / "IMG_0001.MP4").write_bytes(b"x")
+    plan = R.build_plan_for_dir(str(folder), None, m, ledger=None)
+    assert plan.count(R.A_RENAME) == 2 and plan.count(R.A_UNMAPPED) == 1
+    done, errs = R.apply_plan(plan, None, log=lambda m: None)
+    assert done == 2 and not errs
+    assert sorted(os.listdir(folder)) == ["777", "BSN0482", "BSN0592"]
+    assert L.Ledger.read_manifest(str(folder / "BSN0482"))["card_id"] == "319"
+    # 対になる場所: 保存先の中なら NAS の同じ相対位置、無ければ None
+    dest, nas = tmp_path / "dest", tmp_path / "nas"
+    (dest / "N260710").mkdir(parents=True)
+    (nas / "N260710").mkdir(parents=True)
+    other, label, other_label = R.counterpart_dir(str(dest / "N260710"), str(dest), str(nas))
+    assert os.path.normcase(other) == os.path.normcase(str(nas / "N260710")) and (label, other_label) == ("中継", "NAS")
+    other, label, other_label = R.counterpart_dir(str(nas / "N260710"), str(dest), str(nas))
+    assert os.path.normcase(other) == os.path.normcase(str(dest / "N260710")) and (label, other_label) == ("NAS", "中継")
+    assert R.counterpart_dir(str(folder), str(dest), str(nas)) == (None, "指定の場所", "")
+    assert R.season_folder_of(str(dest / "N260710"), str(dest), str(nas)) == "N260710"
+    assert R.season_folder_of(str(dest), str(dest), str(nas)) == ""
+    assert R.season_folder_of(str(folder), str(dest), str(nas)) == "N250410"
+    # 保存先の区切りフォルダを直接指定しても、従来の build_plan と同じ結果（NAS 側も一緒に変える）
+    (dest / "N260710" / "319").mkdir()
+    (nas / "N260710" / "319").mkdir()
+    plan2 = R.build_plan_for_dir(str(dest / "N260710"), str(nas / "N260710"), m, ledger=None, season_folder="N260710")
+    it = next(i for i in plan2.items if i.card_id == "319")
+    assert it.action == R.A_RENAME and it.in_staging and it.in_nas and it.where == "中継・NAS"
+    R.apply_plan(plan2, None, log=lambda m: None)
+    assert (dest / "N260710" / "BSN0482").is_dir() and (nas / "N260710" / "BSN0482").is_dir()
+
+
+def test_clear_against_folder_with_manifest_and_after_rename(env):
+    """過去に取り込んだカード（台帳に無くてもよい）を、動画の置き場所を指定して照合し、消せる。地点名に変えたあとでも manifest で見つかる。"""
+    from camtrapdesk.core.clear import build_folder_index, check_card_in_folder
+    s, ledger = env["settings"], env["ledger"]
+    make_card(env["cards"], "264", n_files=3)
+    run_ingest(env)
+    syncer = NasSyncer(lambda: s, ledger, on_status=lambda m: None, on_log=lambda m: None)
+    while ledger.pending_nas():
+        syncer._tick()
+    # 地点名に変えてある（フォルダ名からはカードIDが分からない）
+    os.rename(env["nas"] / "N260710" / "264", env["nas"] / "N260710" / "BSN0001")
+    vols = list_volumes(scan_roots=[str(env["cards"])])
+    card = detect_cards(vols, "id.txt", ["DCIM/100_BTCF"], ["mp4"], False, 1024)[0]
+    idx = build_folder_index(str(env["nas"]))
+    assert idx.n_folders == 1 and idx.n_files == 3 and len(idx.manifests) == 1
+    v = check_card_in_folder(card, idx, verify_hash=True)
+    assert v.ok and v.mode == "folder" and v.checked_destination.endswith("BSN0001"), v.reasons
+    assert sorted(v.deletable) == ["IMG_0000.MP4", "IMG_0001.MP4", "IMG_0002.MP4"]
+    # 別の台帳（別の PC のつもり）でも消せる。台帳には記録が無いので event だけ残る
+    other_ledger = L.Ledger(str(env["tmp"] / "other.sqlite"))
+    n, errs = delete_files(v, other_ledger, log=lambda m: None)
+    assert n == 3 and not errs
+    assert os.listdir(env["cards"] / "vol_264" / "DCIM" / "100_BTCF") == []
+
+
+def test_clear_against_plain_folder_by_name_and_size(env, tmp_path):
+    """manifest の無いただのコピー先でも、同じ名前・サイズのファイルが全部そろったフォルダがあれば消せる。足りなければ消さない。"""
+    import shutil
+    from camtrapdesk.core.clear import build_folder_index, check_card_in_folder
+    root, _ = make_card(env["cards"], "264", n_files=3)
+    media = os.path.join(root, "DCIM", "100_BTCF")
+    store = tmp_path / "store"
+    shutil.copytree(media, store / "2024" / "cam01")             # 全部ある
+    shutil.copytree(media, store / "2024" / "cam02")             # 名前は同じだが 1 本欠けている
+    os.remove(store / "2024" / "cam02" / "IMG_0002.MP4")
+    vols = list_volumes(scan_roots=[str(env["cards"])])
+    card = detect_cards(vols, "id.txt", ["DCIM/100_BTCF"], ["mp4"], False, 1024)[0]
+    idx = build_folder_index(str(store))
+    v = check_card_in_folder(card, idx)
+    assert v.ok and v.checked_destination.endswith("cam01"), v.reasons
+    v2 = check_card_in_folder(card, idx, verify_hash=True)
+    assert v2.ok
+    # そろったフォルダが無い
+    shutil.rmtree(store / "2024" / "cam01")
+    idx = build_folder_index(str(store))
+    v3 = check_card_in_folder(card, idx)
+    assert not v3.ok and any("2/3" in r for r in v3.reasons)
+    # サイズが違えば一致しない（中身が変わっている）
+    shutil.copytree(media, store / "2024" / "cam03")
+    with open(store / "2024" / "cam03" / "IMG_0000.MP4", "ab") as f:
+        f.write(b"tail")
+    idx = build_folder_index(str(store))
+    assert not check_card_in_folder(card, idx).ok
+    # 変換済み（同じ名前の mp4 だけがある）は、許可したときだけ一致とみなす
+    avi_root, _ = make_card(env["cards"], "265", n_files=0)
+    amedia = os.path.join(avi_root, "DCIM", "100_BTCF")
+    for n in ("IMG_0001.AVI", "IMG_0002.AVI"):
+        with open(os.path.join(amedia, n), "wb") as f:
+            f.write(os.urandom(5000))
+    conv = store / "conv" / "265"
+    conv.mkdir(parents=True)
+    for n in ("IMG_0001.mp4", "IMG_0002.mp4"):
+        (conv / n).write_bytes(b"m" * 100)
+    vols = list_volumes(scan_roots=[str(env["cards"])])
+    acard = next(c for c in detect_cards(vols, "id.txt", ["DCIM/100_BTCF"], ["mp4", "avi"], False, 1024) if c.card_id == "265")
+    idx = build_folder_index(str(store))
+    assert not check_card_in_folder(acard, idx).ok
+    v4 = check_card_in_folder(acard, idx, accept_converted_by_name=True)
+    assert v4.ok and "変換済み" in " ".join(v4.reasons)
+    # 索引はゴミ箱や _破損 を飛ばし、無いフォルダはエラーになる
+    assert build_folder_index(str(tmp_path / "nope")).error
