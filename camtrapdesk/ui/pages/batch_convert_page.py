@@ -76,8 +76,10 @@ class BatchConvertPage(QWidget):
         self.crf.setToolTip("小さいほど高画質で大きいファイル。23 が標準（MJPEG の AVI なら 10分の1 程度）、26 でさらに半分")
         self.parallel = QSpinBox()
         self.parallel.setRange(1, 8)
-        self.parallel.setValue(int(s.convert_parallel))
-        self.parallel.setToolTip("同時に変換する本数。GPU があれば 2〜4、CPU だけなら 1〜2 が目安。NAS 上で変換するときはネットワークの速さも効きます")
+        self.parallel.setValue(int(s.batch_convert_parallel))
+        self.parallel.setToolTip("この画面の一括変換で同時に変換する本数（取り込み時の変換の本数は「設定」で別に決めます）。"
+                                 "他に何も動いていなければ、GPU があれば 4、CPU だけなら 2〜3 が目安。NAS 上で変換するときはネットワークの速さも効きます")
+        self.parallel.valueChanged.connect(self._parallel_changed)
         self.encoder_label = QLabel("")
         h2.addWidget(QLabel("拡張子"))
         h2.addWidget(self.ext_edit)
@@ -184,6 +186,9 @@ class BatchConvertPage(QWidget):
             QMessageBox.warning(self, "保存先", "別のフォルダに保存する場合は、保存先のフォルダを指定してください。")
             return
         st = self.ctx.settings
+        if st.batch_convert_parallel != int(self.parallel.value()):
+            st.batch_convert_parallel = int(self.parallel.value())
+            self.ctx.save()
         if st.batch_convert_in_place != self.inplace_radio.isChecked() or st.batch_convert_out_root != self.out_row.text():
             st.batch_convert_in_place = self.inplace_radio.isChecked()
             st.batch_convert_out_root = self.out_row.text()
@@ -339,6 +344,12 @@ class BatchConvertPage(QWidget):
         saved = (f"空いた容量 {human_size(st.saved_bytes)}" if in_place else f"出力 {human_size(st.bytes_out_done)}") if st.bytes_in_done else ""
         el = f"経過 {st.elapsed/60:.0f} 分" if st.elapsed >= 60 else ""
         self.summary_label.setText("　".join(x for x in (saved, el) if x))
+
+    def _parallel_changed(self, v: int) -> None:
+        st = self.ctx.settings
+        if st.batch_convert_parallel != int(v):
+            st.batch_convert_parallel = int(v)
+            self.ctx.save()
 
     # ------------------------------------------------------------------ 診断
     def diagnose(self) -> None:

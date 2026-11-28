@@ -160,6 +160,8 @@ class SettingsPage(QWidget):
         self.conv_parallel = QSpinBox()
         self.conv_parallel.setRange(1, 8)
         self.conv_parallel.setValue(int(s.convert_parallel))
+        self.conv_parallel.setToolTip("カードの取り込みと同時に裏で動く変換の本数。コピーの検証と CPU を分け合うので 2 が目安。"
+                                      "保存済みのデータの一括変換の本数は「動画を mp4 に変換」の画面で別に決めます")
         self.ffmpeg_path = PathRow(s.ffmpeg_path, "file", placeholder="空なら自動で探す（アプリ同梱 → PATH）",
                                    file_filter="ffmpeg (ffmpeg.exe ffmpeg);;すべて (*)")
         self.ffmpeg_check = QPushButton("ffmpeg とエンコーダを確認")
@@ -174,7 +176,7 @@ class SettingsPage(QWidget):
         hc.addWidget(self.conv_ext)
         hc.addWidget(QLabel("画質（CRF）"))
         hc.addWidget(self.conv_crf)
-        hc.addWidget(QLabel("同時に変換する本数"))
+        hc.addWidget(QLabel("取り込み時に同時に変換する本数"))
         hc.addWidget(self.conv_parallel)
         hc.addStretch(1)
         f5.addRow("", hc)
