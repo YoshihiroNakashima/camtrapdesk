@@ -104,7 +104,10 @@ class BatchConvertPage(QWidget):
         self.stop_btn.setEnabled(False)
         self.stop_btn.setToolTip("変換中のファイルを止めて終わります（止めたファイルは元のまま残り、次回また対象になります）")
         self.stop_btn.clicked.connect(self.stop)
-        for w in (self.scan_btn, self.start_btn, self.pause_btn, self.stop_btn):
+        self.diag_btn = QPushButton("1 本試して診断…")
+        self.diag_btn.setToolTip("動画を 1 本選び、読み出し・デコード・色変換・エンコードにそれぞれ何秒かかるかを測って、遅い原因の見当を付けます")
+        self.diag_btn.clicked.connect(self.diagnose)
+        for w in (self.scan_btn, self.start_btn, self.pause_btn, self.stop_btn, self.diag_btn):
             ops.addWidget(w)
         ops.addStretch(1)
         self.summary_label = QLabel("")
@@ -336,3 +339,59 @@ class BatchConvertPage(QWidget):
         saved = (f"空いた容量 {human_size(st.saved_bytes)}" if in_place else f"出力 {human_size(st.bytes_out_done)}") if st.bytes_in_done else ""
         el = f"経過 {st.elapsed/60:.0f} 分" if st.elapsed >= 60 else ""
         self.summary_label.setText("　".join(x for x in (saved, el) if x))
+
+    # ------------------------------------------------------------------ 診断
+    def diagnose(self) -> None:
+        """動画を 1 本選んで、どこに時間がかかっているかを測る。"""
+        import threading
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFileDialog, QPlainTextEdit, QVBoxLayout
+        from ...core.ffmpeg import diagnose_conversion, find_ffmpeg
+        s = self.ctx.settings
+        ffmpeg = find_ffmpeg(s.ffmpeg_path)
+        if not ffmpeg:
+            QMessageBox.warning(self, "診断", "ffmpeg が見つかりません。設定の「動画の変換の詳細」で場所を指定するかダウンロードしてください。")
+            return
+        start_dir = self.path_row.text() if hasattr(self, "path_row") else ""
+        path, _ = QFileDialog.getOpenFileName(self, "診断する動画を 1 本選ぶ", start_dir,
+                                              "動画 (*.avi *.AVI *.mp4 *.MP4 *.mov);;すべて (*)")
+        if not path:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("変換の診断")
+        dlg.resize(820, 520)
+        lay = QVBoxLayout(dlg)
+        box = QPlainTextEdit()
+        box.setReadOnly(True)
+        box.setPlainText("測っています（同じ動画を数回変換するので、動画の長さの数倍かかります）…\n")
+        lay.addWidget(box)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        btns.rejected.connect(dlg.reject)
+        btns.accepted.connect(dlg.accept)
+        lay.addWidget(btns)
+        lines: list[str] = []
+        result: dict = {}
+
+        def work() -> None:
+            try:
+                result["text"] = diagnose_conversion(ffmpeg, path, s.convert_encoder, int(s.convert_crf), on_progress=lines.append)
+            except Exception as e:  # pragma: no cover
+                result["text"] = "診断でエラー: " + str(e)
+
+        threading.Thread(target=work, name="convert-diag", daemon=True).start()
+        timer = QTimer(dlg)
+        shown = {"n": 0}
+
+        def tick() -> None:
+            if len(lines) > shown["n"]:
+                box.appendPlainText("\n".join(lines[shown["n"]:]))
+                shown["n"] = len(lines)
+            if "text" in result:
+                timer.stop()
+                box.setPlainText(result["text"])
+                self.log.appendPlainText("=== 変換の診断 ===\n" + result["text"])
+
+        timer.timeout.connect(tick)
+        timer.start(300)
+        dlg.exec()
+

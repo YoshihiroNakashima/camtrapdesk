@@ -1577,3 +1577,20 @@ def test_clear_against_plain_folder_by_name_and_size(env, tmp_path):
     assert v4.ok and "変換済み" in " ".join(v4.reasons)
     # 索引はゴミ箱や _破損 を飛ばし、無いフォルダはエラーになる
     assert build_folder_index(str(tmp_path / "nope")).error
+
+
+def test_diagnose_conversion_report(tmp_path):
+    """変換の診断: 読み出し・デコード・色変換・変換の各段階の時間と見立てが出る。"""
+    import pytest
+    from camtrapdesk.core import ffmpeg as F
+    ff = F.find_ffmpeg()
+    if not ff:
+        pytest.skip("ffmpeg が無い")
+    src = tmp_path / "a.avi"
+    assert make_avi(src)
+    seen = []
+    text = F.diagnose_conversion(ff, str(src), "libx264", 23, on_progress=seen.append)
+    assert "1) ファイルを読むだけ" in text and "2) デコードだけ" in text and "3) デコード＋色変換" in text
+    assert "4) 変換（CPU デコード＋libx264）" in text and "見立て:" in text
+    assert seen and seen[0].startswith("ファイル:")
+    assert not list(tmp_path.glob("camtrapdesk_diag_*"))

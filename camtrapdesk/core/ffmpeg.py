@@ -12,7 +12,9 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
+from typing import Callable
 
 # 候補のエンコーダ（上から順に試す）
 HW_ENCODERS = ["h264_nvenc", "h264_qsv", "h264_amf", "h264_videotoolbox"]
@@ -393,6 +395,10 @@ def _run_cancellable(args: list[str], timeout: float, stop: "threading.Event | N
 
 # GPU でのデコード（MJPEG → GPU 上で直接エンコード）。使えなければ CPU デコードに戻す。(エンコーダ, 元コーデック) → 使えるか
 _gpu_decode_ok: dict[tuple[str, str], bool] = {}
+# GPU デコードが「エラー」で使えなかった回数（連続）。1 本だけ対応外の JPEG だったときに全体を CPU に落とさないため、
+# エラーはそのファイルだけ CPU に切り替え、連続して多いときだけ以後を CPU にする。固まった（停止）ときは即座に以後 CPU
+_gpu_decode_fail_streak: dict[tuple[str, str], int] = {}
+GPU_DECODE_GIVE_UP = 5
 # ハードウェアエンコーダが固まった回数（2 回以上なら、変換係はそのセッション中は CPU に切り替える）
 encoder_timeouts: dict[str, int] = {}
 ENCODER_GIVE_UP = 2
@@ -470,6 +476,7 @@ def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
             used_gpu, used_enc = gpu, enc
             if gpu:
                 _gpu_decode_ok[(encoder, info.vcodec)] = True
+                _gpu_decode_fail_streak[(encoder, info.vcodec)] = 0
             break
         try:
             os.remove(dst)
@@ -477,10 +484,18 @@ def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
             pass
         hung = code in (-2, -3)
         if gpu:
-            # GPU デコードが使えない（エラー）か固まった組み合わせ。以後は CPU デコード＋GPU エンコードにする
-            _gpu_decode_ok[(encoder, info.vcodec)] = False
+            key = (encoder, info.vcodec)
             if hung:
+                # 固まった: 以後は CPU デコード＋GPU エンコードにする
+                _gpu_decode_ok[key] = False
                 notes.append("GPU デコードが固まったので CPU デコードでやり直し")
+            else:
+                # このファイルは GPU で読めない（対応外の JPEG など）。このファイルだけ CPU に切り替える。
+                # 連続して何本も失敗するなら、そもそも使えない環境なので以後は試さない
+                _gpu_decode_fail_streak[key] = _gpu_decode_fail_streak.get(key, 0) + 1
+                if _gpu_decode_fail_streak[key] >= GPU_DECODE_GIVE_UP:
+                    _gpu_decode_ok[key] = False
+                notes.append("GPU デコードがこのファイルに使えないので CPU デコードでやり直し")
             continue
         if hung and enc != "libx264":
             encoder_timeouts[enc] = encoder_timeouts.get(enc, 0) + 1
@@ -503,3 +518,149 @@ def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
     if info.duration > 0 and abs(out.duration - info.duration) > max(1.0, info.duration * 0.02):
         return False, f"変換後の長さが合いません（元 {info.duration:.1f}s / 変換後 {out.duration:.1f}s）"
     return True, f"{used_enc}" + ("（デコードも GPU）" if used_gpu else "") + ("。" + "、".join(notes) if notes else "")
+
+
+# ----------------------------------------------------------------------------
+# 変換が遅いときの診断: どこに時間がかかっているかを 1 本の動画で測る
+# ----------------------------------------------------------------------------
+
+def _timed(args: list[str], timeout: float = 1800.0) -> tuple[float, int, str]:
+    """ffmpeg を走らせて (秒, 終了コード, stderr) を返す。"""
+    t0 = time.time()
+    r = _run(args, timeout=timeout)
+    return time.time() - t0, r.returncode, r.stderr or ""
+
+
+def _stream_details(ffmpeg: str, path: str) -> dict:
+    """ffprobe があれば画素形式・fps・ビットレート・音声も読む。"""
+    out: dict = {}
+    fp = ffprobe_path(ffmpeg)
+    if not fp:
+        return out
+    try:
+        r = _run([fp, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path], timeout=120)
+        d = json.loads(r.stdout or "{}")
+    except Exception:
+        return out
+    for st in d.get("streams", []):
+        if st.get("codec_type") == "video" and "vcodec" not in out:
+            fr = st.get("avg_frame_rate") or st.get("r_frame_rate") or "0/1"
+            try:
+                num, den = fr.split("/")
+                fps = float(num) / float(den) if float(den) else 0.0
+            except Exception:
+                fps = 0.0
+            out.update(vcodec=st.get("codec_name"), pix_fmt=st.get("pix_fmt"), width=st.get("width"),
+                       height=st.get("height"), fps=fps, nb_frames=st.get("nb_frames"),
+                       vbitrate=st.get("bit_rate"))
+        elif st.get("codec_type") == "audio" and "acodec" not in out:
+            out.update(acodec=st.get("codec_name"), asample_rate=st.get("sample_rate"))
+    fmt = d.get("format", {})
+    out.update(format=fmt.get("format_name"), bitrate=fmt.get("bit_rate"))
+    return out
+
+
+def diagnose_conversion(ffmpeg: str, src: str, encoder: str = "auto", crf: int = 23,
+                        on_progress: Callable[[str], None] | None = None) -> str:
+    """1 本の動画について、読み出し・デコード・色変換・エンコードにそれぞれ何秒かかるかを測り、原因の見当を付ける。"""
+    import shutil
+    import tempfile
+    lines: list[str] = []
+
+    def say(msg: str) -> None:
+        lines.append(msg)
+        if on_progress:
+            on_progress(msg)
+
+    info = probe(ffmpeg, src)
+    if info is None:
+        return "元の動画を読み取れません（壊れている可能性）"
+    det = _stream_details(ffmpeg, src)
+    size = os.path.getsize(src)
+    dur = info.duration or 0.0
+    say(f"ファイル: {src}")
+    say(f"  {size/1e6:.0f} MB、{dur:.1f} 秒、{info.width}x{info.height}、映像 {det.get('vcodec') or info.vcodec}"
+        + (f"（{det.get('pix_fmt')}）" if det.get("pix_fmt") else "")
+        + (f"、{det.get('fps'):.1f} fps" if det.get("fps") else "")
+        + (f"、音声 {det.get('acodec')}" if det.get("acodec") else "、音声なし")
+        + (f"、{int(det['bitrate'])/1e6:.0f} Mbps" if det.get("bitrate") else ""))
+    enc = detect_encoder(ffmpeg, encoder)
+    say(f"  エンコーダ: {enc}（設定 {encoder}）")
+
+    # 1) 読み出しだけ（ディスク／NAS の速さ）
+    t0 = time.time()
+    n = 0
+    with open(src, "rb", buffering=0) as f:
+        while True:
+            b = f.read(8 << 20)
+            if not b:
+                break
+            n += len(b)
+    t_read = time.time() - t0
+    say(f"1) ファイルを読むだけ: {t_read:.1f} 秒（{n/1e6/max(t_read, 1e-6):.0f} MB/s）")
+
+    # 2) デコードだけ（映像のみ）
+    t_dec, code, err = _timed([ffmpeg, "-hide_banner", "-v", "warning", "-nostdin", "-i", src, "-map", "0:v:0",
+                               "-f", "null", "-"])
+    warn = [ln.strip() for ln in err.splitlines() if ln.strip()]
+    say(f"2) デコードだけ（CPU）: {t_dec:.1f} 秒（{dur/max(t_dec, 1e-6):.1f} 倍速）" + ("" if code == 0 else f"　終了コード {code}"))
+    noninter = any("non-interleaved" in w.lower() for w in warn)
+    for w in warn[:5]:
+        say(f"   ffmpeg: {w}")
+
+    # 3) デコード＋yuv420p への色変換
+    t_pix, code, _ = _timed([ffmpeg, "-v", "error", "-nostdin", "-i", src, "-map", "0:v:0", "-pix_fmt", "yuv420p",
+                             "-f", "null", "-"])
+    say(f"3) デコード＋色変換: {t_pix:.1f} 秒")
+
+    tmpdir = tempfile.mkdtemp(prefix="camtrapdesk_diag_")
+    try:
+        # 4) いつもの変換（CPU デコード＋選んだエンコーダ）
+        dst = os.path.join(tmpdir, "a.mp4")
+        t_enc, code, err = _timed(_build_args(ffmpeg, src, dst, enc, crf, info, 0, False))
+        out_size = os.path.getsize(dst) if os.path.isfile(dst) else 0
+        say(f"4) 変換（CPU デコード＋{enc}）: {t_enc:.1f} 秒（{dur/max(t_enc, 1e-6):.1f} 倍速、{out_size/1e6:.0f} MB）"
+            + ("" if code == 0 else f"　失敗: {err.strip().splitlines()[-1] if err.strip() else code}"))
+        # 5) GPU デコード
+        t_gpu = None
+        if enc in _GPU_DECODE and info.vcodec in _GPU_DECODE[enc]:
+            dst2 = os.path.join(tmpdir, "b.mp4")
+            t_gpu, code, err = _timed(_build_args(ffmpeg, src, dst2, enc, crf, info, 0, True))
+            say(f"5) 変換（GPU デコード＋{enc}）: {t_gpu:.1f} 秒（{dur/max(t_gpu, 1e-6):.1f} 倍速）"
+                + ("" if code == 0 else f"　使えません: {err.strip().splitlines()[-1] if err.strip() else code}"))
+            if code != 0:
+                t_gpu = None
+        # 6) CPU（libx264）との比較
+        t_x264 = None
+        if enc != "libx264":
+            dst3 = os.path.join(tmpdir, "c.mp4")
+            t_x264, code, _ = _timed(_build_args(ffmpeg, src, dst3, "libx264", crf, info, 0, False))
+            say(f"6) 変換（CPU のみ libx264 veryfast）: {t_x264:.1f} 秒（{dur/max(t_x264, 1e-6):.1f} 倍速）")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # 見立て
+    say("")
+    say("見立て:")
+    if t_read > 0.5 * t_enc and n / 1e6 / max(t_read, 1e-6) < 60:
+        say(f" - 読み出しが遅い（{n/1e6/max(t_read, 1e-6):.0f} MB/s）。NAS や HDD、USB の SD カードから直接変換していませんか。中継の SSD 上で変換すると速くなります")
+    if noninter:
+        say(" - ffmpeg が「Non-interleaved AVI」と言っています。映像と音声が交互に並んでいない（索引が無い）AVI で、読むときに行ったり来たりするため"
+            "遅くなります。カメラの書き方の問題で、ローカルの SSD 上なら影響は小さくなります")
+    if t_dec > 0.6 * t_enc:
+        say(f" - 時間の大半はデコード（MJPEG の展開）です（デコードだけで {t_dec:.1f} 秒）。夜間の赤外線映像のようなノイズの多い動画は JPEG が大きく、展開に時間がかかります。"
+            + ("GPU デコードが使えるので、そちらを使えば速くなります" if t_gpu and t_gpu < t_enc * 0.7 else
+               "GPU デコードが使えない（または速くない）環境です。同時に変換する本数を増やすと全体の時間は短くなります"))
+    if t_pix - t_dec > 0.3 * t_enc:
+        say(f" - 色変換（{det.get('pix_fmt')} → yuv420p）に {t_pix - t_dec:.1f} 秒かかっています")
+    if t_enc - t_pix > 0.5 * t_enc:
+        say(f" - エンコード自体に時間がかかっています（{t_enc - t_pix:.1f} 秒）。"
+            + ("GPU のエンコーダを使うか、" if enc == "libx264" else "")
+            + "設定の CRF を上げる（例: 26）と速く小さくなります")
+    if t_gpu is not None and t_gpu < t_enc * 0.7:
+        say(f" - GPU デコードの経路なら {t_gpu:.1f} 秒です。普段の変換でこれが使われていないなら、一度 GPU デコードに失敗して CPU に切り替わった"
+            "ままかもしれません（アプリを起動し直すと再び試します）")
+    if max(t_enc, t_dec) < max(2.0, dur * 0.5):
+        say(" - この 1 本は十分速く変換できています。普段遅いのは、取り込みの検証（ハッシュ計算）や NAS 転送と同時に走って CPU を奪い合っているか、"
+            "別の動画が重いかのどちらかです。取り込みが終わってから変換するか、同時に変換する本数を減らしてみてください")
+    return "\n".join(lines)
