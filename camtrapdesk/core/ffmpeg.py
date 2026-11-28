@@ -135,8 +135,9 @@ def candidate_status(path: str) -> str:
 # ----------------------------------------------------------------------------
 
 FFMPEG_WIN_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
-# 最新ビルドは新しい NVENC API を要求し、古い NVIDIA ドライバでは「Driver does not support the required nvenc API version」になる。
-# ドライバを更新できないときの代わり: ffmpeg の安定版（gyan.dev のリリースビルド。少し古い API で作られている）
+# 最新ビルドは新しい NVENC API を要求し、古い NVIDIA ドライバでは「Driver does not support the required nvenc API version」になる
+# （API 13.1 = Video Codec SDK 13.1（2026-07）はドライバ 610 以降）。gyan.dev のリリース版も 2026 年秋以降は同じ API なので、
+# この件の解決はドライバの更新。安定版ボタンは、最新ビルドに別の不具合があるときの代わりとして残す
 FFMPEG_WIN_URL_STABLE = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 FFMPEG_MAC_URL = "https://evermeet.cx/ffmpeg/getrelease/zip"
 

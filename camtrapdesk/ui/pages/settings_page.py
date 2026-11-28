@@ -169,9 +169,10 @@ class SettingsPage(QWidget):
         self.ffmpeg_dl = QPushButton("ffmpeg をダウンロードして入れる")
         self.ffmpeg_dl.setToolTip("公式ビルド（Windows は約 200 MB、GitHub から）を取ってきて、アプリの tools フォルダに置きます。Mac は evermeet.cx の静的ビルド")
         self.ffmpeg_dl.clicked.connect(lambda: self._download_ffmpeg(stable=False))
-        self.ffmpeg_dl_stable = QPushButton("安定版の ffmpeg を入れる（ドライバが古いとき）")
-        self.ffmpeg_dl_stable.setToolTip("最新ビルドが「Driver does not support the required nvenc API version」で GPU を使えないとき、"
-                                         "少し古い API で作られた安定版（gyan.dev、約 100 MB）に入れ替えます。NVIDIA ドライバを更新できるなら、そのほうが確実です")
+        self.ffmpeg_dl_stable = QPushButton("安定版の ffmpeg を入れる（gyan.dev）")
+        self.ffmpeg_dl_stable.setToolTip("ffmpeg のリリース版（gyan.dev、約 100 MB）に入れ替えます。最新ビルドで不具合があるときの代わり。"
+                                         "「Driver does not support the required nvenc API version」の解決にはなりません（こちらも新しい API で作られています）。"
+                                         "その場合は NVIDIA のドライバを更新してください")
         self.ffmpeg_dl_stable.clicked.connect(lambda: self._download_ffmpeg(stable=True))
         self.ffmpeg_result = QLabel("")
         self.ffmpeg_result.setWordWrap(True)
@@ -291,8 +292,10 @@ class SettingsPage(QWidget):
         if enc == "libx264" and pref == "auto":
             lines.append("GPU があるのに × のときは、グラフィックドライバを最新にするか、理由の行を知らせてください")
         if any("nvenc api version" in why.lower() for _n, ok, why in encoder_report(path, pref) if not ok):
-            lines.append("→ NVIDIA のドライバがこの ffmpeg より古いためです。NVIDIA のドライバを更新する（NVIDIA アプリか nvidia.co.jp から。"
-                         "Required の数字が 13.1 なら 610 以降）か、「安定版の ffmpeg を入れる」で少し古い API の ffmpeg に入れ替えてください")
+            lines.append("→ NVIDIA のドライバがこの ffmpeg より古いためです。NVIDIA のドライバを更新してください（NVIDIA アプリ、または nvidia.co.jp のドライバダウンロード。"
+                         "Required が 13.1 なら 610 以降が必要。Found が 13.0 なら今は 570〜609）。更新して再起動したら、もう一度この「確認」を押します。"
+                         "いま配布されている ffmpeg はどれも新しい API で作られているので、ffmpeg を入れ替えても解決しません。"
+                         "ドライバを更新できない PC では、2026 年 7 月より前のビルド（例: gyan.dev の packages にある ffmpeg 8.0.x）を自分で置き、上の「ffmpeg の場所」で指定してください")
         self.ffmpeg_result.setText("\n".join(lines))
 
     def _download_ffmpeg(self, stable: bool = False) -> None:
