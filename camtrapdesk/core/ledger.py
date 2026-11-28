@@ -190,6 +190,15 @@ class Ledger:
         if "broken" not in fcols:
             c.execute("ALTER TABLE files ADD COLUMN broken TEXT")
 
+    def backup_to(self, path: str) -> None:
+        """台帳を path へ丸ごとコピーする（SQLite のバックアップ API。開いたままでも整合した写しになる）。"""
+        with self._lock, self._conn() as src:
+            dst = sqlite3.connect(path)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+
     def _conn(self) -> sqlite3.Connection:
         c = sqlite3.connect(self.path, timeout=30, check_same_thread=False)
         c.row_factory = sqlite3.Row

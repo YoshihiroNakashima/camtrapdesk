@@ -126,6 +126,8 @@ class IngestPage(QWidget):
         # --- シグナル ---
         ctx.job_updated.connect(self._on_job_updated)
         ctx.log_message.connect(self._append_log)
+        for m in getattr(ctx, "_startup_notes", []):
+            self._append_log(m)
         ctx.ingest_batch_done.connect(self._on_batch_done)
         ctx.nas_status.connect(self._on_nas_status)
         ctx.nas_progress.connect(self._on_nas_progress)
@@ -229,8 +231,13 @@ class IngestPage(QWidget):
             self.dest_row.edit.setFocus()
             return
         if not os.path.isdir(s.dest_root):
-            QMessageBox.warning(self, "取り込みを開始", f"保存先が見つかりません:\n{s.dest_root}\n\n接続を確認するか、別の場所を指定してください。")
-            return
+            moved = self.ctx.relocate_dest_root()
+            if moved:
+                self._append_log(moved)
+                self._refresh_labels()
+            else:
+                QMessageBox.warning(self, "取り込みを開始", f"保存先が見つかりません:\n{s.dest_root}\n\n接続を確認するか、別の場所を指定してください。")
+                return
         free = I.free_bytes(s.dest_root) if s.dest_root else None
         waiting = [j for j in ing.jobs.values() if j.state == I.S_DETECTED and not j.card.problems]
         total = sum(j.card.total_bytes for j in waiting)

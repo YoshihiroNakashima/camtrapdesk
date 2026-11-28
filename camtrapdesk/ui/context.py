@@ -6,7 +6,8 @@ import os
 
 from PySide6.QtCore import QObject, Signal
 
-from ..config import Settings, config_dir, load_settings, save_settings
+from ..config import Settings, config_dir, is_portable, load_settings, save_settings
+from ..core.roots import locate_root, read_root_id, volume_bases
 from ..core.batch_convert import BatchConverter
 from ..core.convert import Converter
 from ..core.ingest import CardJob, IngestManager
@@ -34,6 +35,12 @@ class AppContext(QObject):
         self.settings: Settings = load_settings()
         self.ledger = Ledger(os.path.join(config_dir(), "ledger.sqlite"))
         self._apply_match_mode()
+        self._startup_notes: list[str] = []
+        if is_portable():
+            self._startup_notes.append(f"持ち運びモード: 設定と台帳はアプリの隣の {config_dir()} にあります")
+        moved = self.relocate_dest_root()
+        if moved:
+            self._startup_notes.append(moved)
         # 取り込みを始めてから止めるまで、Windows の通知ポップアップ（「スキャンして修復しますか」など）を止める
         self.toasts = ToastSuppressor(os.path.join(config_dir(), "toasts_before.json"))
         if self.toasts.restore_leftover():
@@ -67,6 +74,29 @@ class AppContext(QObject):
         s = self.settings
         return (s.dest_root, s.nas_root, s.season_folder.strip(), s.convert_enabled, tuple(s.media_subdirs),
                 s.broken_check, s.broken_action)
+
+    def relocate_dest_root(self) -> str | None:
+        """保存先（中継）のドライブ文字が変わっていたら、目印（.camtrapdesk-root.json）で見つけ直して設定を直す。
+        直したら知らせる文を返す。保存先が見えていれば目印の ID を覚える。"""
+        s = self.settings
+        if not s.dest_root:
+            return None
+        if os.path.isdir(s.dest_root):
+            rid = read_root_id(s.dest_root)
+            if rid and rid != s.dest_root_id:
+                s.dest_root_id = rid
+                save_settings(s)
+            return None
+        if not s.dest_root_id:
+            return None
+        found = locate_root(s.dest_root_id, hint_paths=[], search_bases=lambda: volume_bases(exclude=[s.nas_root]))
+        if not found or os.path.normcase(found) == os.path.normcase(s.dest_root):
+            return None
+        old = s.dest_root
+        s.dest_root = found
+        save_settings(s)
+        self._dest_sig = self._destination_signature()
+        return f"保存先のドライブ文字が変わっていたので {old} → {found} に直しました"
 
     def _arm_changed(self, armed: bool) -> None:
         if armed:

@@ -12,11 +12,44 @@ from typing import Any
 from . import APP_NAME
 
 
+PORTABLE_DIR_NAME = "camtrapdesk-data"   # アプリの隣にこの名前のフォルダがあれば、設定と台帳をそこに置く（SSD ごと持ち運べる）
+
+
+def app_root() -> Path:
+    """アプリのフォルダ。配布版は exe（Mac は .app）のあるフォルダ、ソースから動かしているときはリポジトリのルート。"""
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).resolve()
+        if sys.platform == "darwin" and ".app/Contents/MacOS" in str(exe):
+            return exe.parents[3]   # camtrapdesk.app の隣
+        return exe.parent
+    return Path(__file__).resolve().parents[1]
+
+
+def portable_dir() -> Path:
+    return app_root() / PORTABLE_DIR_NAME
+
+
+def is_portable() -> bool:
+    """設定と台帳をアプリの隣（camtrapdesk-data）に置く「持ち運び」モードか。"""
+    return not os.environ.get("CAMTRAPDESK_HOME") and portable_dir().is_dir()
+
+
+def default_config_dir() -> Path:
+    """OS 標準の置き場所（持ち運びモードでないときの場所）。"""
+    if sys.platform == "win32":
+        return Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_NAME
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP_NAME
+
+
 def config_dir() -> Path:
-    """OSごとの設定・台帳の保存先。環境変数 CAMTRAPDESK_HOME で上書きできる。"""
+    """設定・台帳の保存先。環境変数 CAMTRAPDESK_HOME > アプリの隣の camtrapdesk-data（持ち運び） > OS 標準の順。"""
     override = os.environ.get("CAMTRAPDESK_HOME")
     if override:
         p = Path(override)
+    elif portable_dir().is_dir():
+        p = portable_dir()
     elif sys.platform == "win32":
         p = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
     elif sys.platform == "darwin":
@@ -34,7 +67,8 @@ def _default_fieldnote_path() -> str:
 @dataclass
 class Settings:
     # --- 取り込み先 ---
-    dest_root: str = ""            # 中継（または直接NAS）の保存先ルート
+    dest_root: str = ""
+    dest_root_id: str = ""         # dest_root の目印（.camtrapdesk-root.json）の ID。ドライブ文字が変わっても見つけ直すため            # 中継（または直接NAS）の保存先ルート
     nas_root: str = ""             # NASの最終保存先。空ならNAS転送は行わない
     season_folder: str = ""        # 現在の取り込み先フォルダ名（例: N260710）
     # --- SDカード内の対象 ---

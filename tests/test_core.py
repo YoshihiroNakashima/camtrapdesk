@@ -1594,3 +1594,20 @@ def test_diagnose_conversion_report(tmp_path):
     assert "4) 変換（CPU デコード＋libx264）" in text and "見立て:" in text
     assert seen and seen[0].startswith("ファイル:")
     assert not list(tmp_path.glob("camtrapdesk_diag_*"))
+
+
+def test_portable_data_dir_and_ledger_backup(tmp_path, monkeypatch):
+    """アプリの隣に camtrapdesk-data があれば設定と台帳をそこに置く。台帳は開いたままバックアップできる。"""
+    from camtrapdesk import config as C
+    monkeypatch.delenv("CAMTRAPDESK_HOME", raising=False)
+    monkeypatch.setattr(C, "app_root", lambda: tmp_path)
+    assert not C.is_portable()
+    (tmp_path / C.PORTABLE_DIR_NAME).mkdir()
+    assert C.is_portable() and C.config_dir() == tmp_path / C.PORTABLE_DIR_NAME
+    monkeypatch.setenv("CAMTRAPDESK_HOME", str(tmp_path / "env"))
+    assert not C.is_portable() and C.config_dir() == tmp_path / "env"
+    ledger = L.Ledger(str(tmp_path / "a.sqlite"))
+    ledger.event("test", "hello")
+    ledger.backup_to(str(tmp_path / "b.sqlite"))
+    copy = L.Ledger(str(tmp_path / "b.sqlite"))
+    assert any(e["message"] == "hello" for e in copy.recent_events(limit=10))

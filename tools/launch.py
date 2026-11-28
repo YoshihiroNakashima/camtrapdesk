@@ -88,9 +88,26 @@ def fix_conda_path() -> None:
             return
 
 
+def venv_is_from_this_pc() -> bool:
+    """.venv の元になった Python がこの PC にあるか。外付け SSD ごと別の PC へ持って行くと無いことがある。"""
+    if not os.path.exists(PY):
+        return False
+    home = venv_home()
+    exe = os.path.join(home, "python.exe" if IS_WIN else "python3")
+    return os.path.exists(exe) or os.path.exists(os.path.join(home, "python"))
+
+
 def main() -> None:
     os.chdir(ROOT)
     with open(LOG, "a", encoding="utf-8") as logf:
+        if os.path.exists(PY) and not venv_is_from_this_pc():
+            say("この .venv は別の PC の Python で作られているので、この PC 用に作り直します。")
+            logf.write(f"venv home {venv_home()} not found on this PC; recreating\n")
+            try:
+                venv.EnvBuilder(with_pip=True, clear=True).create(VENV)
+            except Exception as e:
+                logf.write(f"venv recreate failed: {e}\n")
+                fail("仮想環境（.venv）の作り直しに失敗しました。.venv フォルダを削除してからもう一度実行してください。")
         if not os.path.exists(PY):
             say("=" * 60)
             say(" camtrapdesk 初回セットアップ")

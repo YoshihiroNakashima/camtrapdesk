@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QVBoxLayout,
                                QWidget)
 
+from ...config import config_dir, is_portable, portable_dir
 from ...core.fieldnote import format_station
 from ..context import AppContext
 from ..widgets import PathRow
@@ -224,6 +226,25 @@ class SettingsPage(QWidget):
         self.station_digits.valueChanged.connect(self._update_example)
         self._update_example()
         lay.addWidget(g4)
+
+        # --- 持ち運び ---
+        g7 = QGroupBox("持ち運び（外付け SSD にアプリごと置いて、別の PC でも使う）")
+        f7 = QFormLayout(g7)
+        f7.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        self.portable_label = QLabel("")
+        self.portable_label.setWordWrap(True)
+        self.portable_btn = QPushButton("")
+        self.portable_btn.clicked.connect(self._toggle_portable)
+        f7.addRow(self.portable_label)
+        f7.addRow("", self.portable_btn)
+        note7 = QLabel("通常、設定と台帳（取り込みの記録）はこの PC の中に保存されるので、SSD を別の PC に挿しても引き継がれません。"
+                       "持ち運びモードにすると、アプリのフォルダの隣の camtrapdesk-data に保存するので、SSD ごと持ち歩けます。"
+                       "保存先（中継）が同じ SSD の中なら、別の PC でドライブ文字が変わっても目印で見つけ直します。"
+                       "NAS のパス（\\\\NAS名\\…）はそのネットワークにいるときだけ使えます。")
+        note7.setWordWrap(True)
+        f7.addRow(note7)
+        lay.addWidget(g7)
+        self._refresh_portable()
         lay.addStretch(1)
 
         # 値を変えたらそのまま保存する
@@ -310,6 +331,57 @@ class SettingsPage(QWidget):
 
         timer.timeout.connect(tick)
         timer.start(200)
+
+    def _refresh_portable(self) -> None:
+        if is_portable():
+            self.portable_label.setText(f"持ち運びモード: オン。設定と台帳は {config_dir()} にあります")
+            self.portable_btn.setText("この PC の標準の場所（%APPDATA%）に戻す")
+        else:
+            self.portable_label.setText(f"持ち運びモード: オフ。設定と台帳はこの PC の {config_dir()} にあります（持ち運び先: {portable_dir()}）")
+            self.portable_btn.setText("設定と台帳をアプリの隣に移して、持ち運びモードにする")
+
+    def _toggle_portable(self) -> None:
+        import shutil
+        pdir = portable_dir()
+        if is_portable():
+            # 戻す: フォルダ名を変えて無効にする（中身は残す）
+            msg = (f"持ち運びモードをやめます。{pdir} は {pdir.name}.off という名前に変えて残します（消しません）。\n"
+                   "この PC の標準の場所にある設定と台帳が使われるようになります（無ければ初期状態）。\n\nアプリを終了して、名前を変えてよいですか？")
+            if QMessageBox.question(self, "持ち運びモード", msg) != QMessageBox.StandardButton.Yes:
+                return
+            off = pdir.with_name(pdir.name + ".off")
+            try:
+                if off.exists():
+                    shutil.rmtree(off)
+                self.ctx.stop_background()
+                self.ctx.ledger.close() if hasattr(self.ctx.ledger, "close") else None
+                os.rename(pdir, off)
+            except OSError as e:
+                QMessageBox.critical(self, "持ち運びモード", f"フォルダ名を変えられませんでした: {e}")
+                return
+            QMessageBox.information(self, "持ち運びモード", "名前を変えました。アプリを閉じます。次に起動したときから、この PC の標準の場所を使います。")
+            self.window().close()
+            return
+        msg = (f"設定と台帳を {pdir} にコピーして、以後はそこを使います（この PC の標準の場所にある元のファイルは残ります）。\n"
+               "アプリのフォルダごと SSD を持ち歩けば、別の PC でも同じ設定と記録で使えます。\n\nコピーしてアプリを閉じてよいですか？")
+        if QMessageBox.question(self, "持ち運びモード", msg) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            pdir.mkdir(parents=True, exist_ok=True)
+            self.ctx.save()
+            src_dir = config_dir()
+            shutil.copy2(src_dir / "settings.json", pdir / "settings.json")
+            self.ctx.ledger.backup_to(str(pdir / "ledger.sqlite"))
+        except Exception as e:
+            QMessageBox.critical(self, "持ち運びモード", f"コピーできませんでした: {e}")
+            try:
+                if pdir.is_dir() and not any(pdir.iterdir()):
+                    pdir.rmdir()
+            except OSError:
+                pass
+            return
+        QMessageBox.information(self, "持ち運びモード", f"コピーしました: {pdir}\nアプリを閉じます。次に起動したときから持ち運びモードです。")
+        self.window().close()
 
     def _update_example(self) -> None:
         pre = self.station_prefix.text().strip()
