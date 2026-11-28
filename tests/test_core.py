@@ -1448,6 +1448,8 @@ def test_hardware_encoder_stall_falls_back_to_cpu(tmp_path, monkeypatch):
     monkeypatch.setattr(F, "_run_cancellable", fake)
     monkeypatch.setattr(F, "encoder_timeouts", {})
     monkeypatch.setattr(F, "_gpu_decode_ok", {})
+    # 経路は測定済み（GPU デコード＋nvenc）という前提にして、測定を飛ばす
+    monkeypatch.setattr(F, "_pipeline_choice", {("h264_nvenc", "mjpeg"): (True, "h264_nvenc", "測定済み")})
     dst = tmp_path / "a.mp4.part"
     ok, msg = F.convert_to_mp4(ff, str(src), str(dst), "h264_nvenc", 23)
     assert ok, msg
@@ -1458,6 +1460,66 @@ def test_hardware_encoder_stall_falls_back_to_cpu(tmp_path, monkeypatch):
     # 2 回固まったら、変換係はセッションの残りを CPU にする
     F.encoder_timeouts["h264_nvenc"] = 2
     assert F.encoder_unreliable("h264_nvenc") and not F.encoder_unreliable("libx264")
+
+
+def test_choose_pipeline_rules():
+    """測った時間からの経路の選び方: HW の最速を取り、CPU のみはそれより 2 割以上速いときだけ。"""
+    from camtrapdesk.core import ffmpeg as F
+    g, c, x = (True, "h264_nvenc"), (False, "h264_nvenc"), (False, "libx264")
+    assert F._choose_pipeline({g: 3.0, c: 2.0, x: 1.9}) == c          # CPU は 2 割以上速くないので HW
+    assert F._choose_pipeline({g: 3.0, c: 2.0, x: 1.5}) == x          # CPU が 2 割以上速い
+    assert F._choose_pipeline({g: 1.0, c: 2.0, x: 1.5}) == g
+    assert F._choose_pipeline({g: None, c: None, x: 1.5}) == x       # HW が全滅
+    assert F._choose_pipeline({g: None, c: 2.0}) == c
+    assert F._choose_pipeline({g: None, c: None, x: None}) is None
+
+
+def test_pipeline_trial_measures_once_and_reuses(tmp_path, monkeypatch):
+    """ハードウェアエンコーダのとき、最初の 1 本の冒頭で 3 経路を測って速いものを選び、同じ種類の次の動画にはそのまま使う。
+    並行して始めた 2 本目は測り終わるまで待つので、測るのは 1 回だけ。"""
+    import pytest
+    import threading
+    from camtrapdesk.core import ffmpeg as F
+    ff = F.find_ffmpeg()
+    if not ff:
+        pytest.skip("ffmpeg が無い")
+    a, b = tmp_path / "a.avi", tmp_path / "b.avi"
+    assert make_avi(a, seconds=1.0) and make_avi(b, seconds=1.0)
+    real = F._run_cancellable
+    calls: list[tuple[bool, bool, bool]] = []
+    lock = threading.Lock()
+
+    def fake(args, timeout, stop, watch_path=None, stall_sec=F.STALL_SEC):
+        with lock:
+            calls.append(("cuda" in args, "h264_nvenc" in args, "-t" in args))
+        if "h264_nvenc" in args:
+            time.sleep(0.6)          # GPU の無い CI でも動くように、HW の経路は「遅く成功した」ことにする
+            return 0, ""
+        return real(args, timeout, stop, watch_path, stall_sec)
+
+    monkeypatch.setattr(F, "_run_cancellable", fake)
+    monkeypatch.setattr(F, "_pipeline_choice", {})
+    monkeypatch.setattr(F, "_gpu_decode_ok", {})
+    results: dict[str, tuple[bool, str]] = {}
+
+    def run(src):
+        results[src.name] = F.convert_to_mp4(ff, str(src), str(tmp_path / (src.stem + ".mp4.part")), "h264_nvenc", 23)
+
+    th = [threading.Thread(target=run, args=(a,)), threading.Thread(target=run, args=(b,))]
+    th[0].start(); time.sleep(0.1); th[1].start()
+    for x in th:
+        x.join(60)
+    assert results["a.avi"][0] and results["b.avi"][0], results
+    trials = [c for c in calls if c[2]]
+    assert trials == [(True, True, True), (False, True, True), (False, False, True)]   # GPU デコード＋HW → CPU デコード＋HW → CPU のみ、1 回だけ
+    choice = F._pipeline_choice[("h264_nvenc", "mjpeg")]
+    assert choice[:2] == (False, "libx264") and "CPU のみ" in choice[2] and "選択" in choice[2]
+    msgs = [results["a.avi"][1], results["b.avi"][1]]
+    assert sum("選択" in m for m in msgs) == 1 and all(m.startswith("libx264") for m in msgs)
+    assert [c for c in calls if not c[2]] == [(False, False, False), (False, False, False)]   # 本番は選んだ CPU のみ
+    assert not list(tmp_path.glob("*.trial*"))
+    F.reset_hardware_state()
+    assert F._pipeline_choice == {}
 
 
 # ----------------------------------------------------------------------------

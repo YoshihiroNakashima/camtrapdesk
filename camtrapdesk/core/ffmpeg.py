@@ -92,6 +92,7 @@ def reset_hardware_state() -> None:
     encoder_timeouts.clear()
     _gpu_decode_ok.clear()
     _gpu_decode_fail_streak.clear()
+    _pipeline_choice.clear()
 
 
 def why_not_hardware(ffmpeg: str, preferred: str) -> str:
@@ -441,19 +442,96 @@ _GPU_DECODE = {
 }
 
 
+# 経路の選び方: 最初の 1 本の冒頭 TRIAL_SEC 秒で「GPU デコード＋HW エンコード」「CPU デコード＋HW エンコード」「CPU のみ（libx264）」を
+# 順に試して時間を測り、速いものをそのセッションの以後の同じ種類の動画に使う。MJPEG の GPU デコード（cuvid）は PC によっては
+# CPU より遅く、ハードウェアエンコードも CPU のコアが多い PC では libx264 veryfast に負けることがあるため、決め打ちにしない。
+TRIAL_SEC = 8.0
+CPU_WIN_MARGIN = 0.8    # CPU のみが HW の最速より 2 割以上速いときだけ CPU にする（HW なら CPU が空くので、同時に何本も走らせるときに有利）
+_pipeline_choice: dict[tuple[str, str], tuple[bool, str, str]] = {}   # (エンコーダ, 元のコーデック) → (GPU デコード, エンコーダ, 測った結果の文)
+_trial_lock = threading.Lock()
+
+
+def pipeline_choice(encoder: str, vcodec: str) -> tuple[bool, str, str] | None:
+    """このセッションで測って選んだ経路（まだ測っていなければ None）。"""
+    return _pipeline_choice.get((encoder, vcodec))
+
+
+def _pipeline_name(gpu: bool, enc: str) -> str:
+    if enc == CPU_ENCODER:
+        return "CPU のみ（libx264）"
+    return ("GPU デコード＋" if gpu else "CPU デコード＋") + enc
+
+
+def _choose_pipeline(times: dict[tuple[bool, str], float | None]) -> tuple[bool, str] | None:
+    """測った時間から経路を選ぶ。HW の中で最速を取り、CPU のみがそれより CPU_WIN_MARGIN 倍未満の時間なら CPU のみ。"""
+    ok = {k: v for k, v in times.items() if v is not None}
+    if not ok:
+        return None
+    hw = {k: v for k, v in ok.items() if k[1] != CPU_ENCODER}
+    cpu = ok.get((False, CPU_ENCODER))
+    if hw:
+        best = min(hw, key=lambda k: hw[k])
+        if cpu is not None and cpu < hw[best] * CPU_WIN_MARGIN:
+            return (False, CPU_ENCODER)
+        return best
+    return (False, CPU_ENCODER) if cpu is not None else None
+
+
+def _trial_pipelines(ffmpeg: str, src: str, dst: str, encoder: str, crf: int, info: "MediaInfo",
+                     stop: "threading.Event | None") -> tuple[bool, str, str] | None:
+    """最初の 1 本の冒頭 TRIAL_SEC 秒で各経路の速さを測り、(GPU デコード, エンコーダ, 説明) を返す。中止・全滅なら None。"""
+    key = (encoder, info.vcodec)
+    cands: list[tuple[bool, str]] = []
+    if encoder in _GPU_DECODE and info.vcodec in _GPU_DECODE[encoder] and _gpu_decode_ok.get(key, True):
+        cands.append((True, encoder))
+    cands.append((False, encoder))
+    if encoder != CPU_ENCODER:
+        cands.append((False, CPU_ENCODER))
+    span = min(TRIAL_SEC, info.duration) if info.duration > 0 else TRIAL_SEC
+    times: dict[tuple[bool, str], float | None] = {}
+    for i, (gpu, enc) in enumerate(cands):
+        if stop is not None and stop.is_set():
+            return None
+        out = f"{dst}.trial{i}"
+        args = _build_args(ffmpeg, src, out, enc, crf, info, 0, gpu, trial_sec=TRIAL_SEC)
+        t0 = time.time()
+        try:
+            code, _err = _run_cancellable(args, timeout=max(60.0, TRIAL_SEC * 10), stop=stop, watch_path=out, stall_sec=30.0)
+        except OSError:
+            code = 1
+        dt = time.time() - t0
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+        if code == -1:
+            return None
+        times[(gpu, enc)] = dt if code == 0 else None
+    choice = _choose_pipeline(times)
+    if choice is None:
+        return None
+    desc = "、".join(f"{_pipeline_name(*k)} {v:.1f}秒" if v is not None else f"{_pipeline_name(*k)} 不可" for k, v in times.items())
+    return choice[0], choice[1], f"冒頭 {span:.0f} 秒で速さを測って {_pipeline_name(*choice)} を選択（{desc}）"
+
+
 def gpu_decode_available(encoder: str, vcodec: str) -> bool | None:
     """この組み合わせで GPU デコードが使えたか（None はまだ試していない）。"""
     return _gpu_decode_ok.get((encoder, vcodec))
 
 
 def _build_args(ffmpeg: str, src: str, dst: str, encoder: str, crf: int, info: "MediaInfo", threads: int,
-                gpu_decode: bool) -> list[str]:
+                gpu_decode: bool, trial_sec: float = 0.0) -> list[str]:
     args = [ffmpeg, "-v", "error", "-y", "-nostdin"]
     if gpu_decode:
         args += _GPU_DECODE[encoder][info.vcodec]
+    if trial_sec:
+        args += ["-t", f"{trial_sec:g}"]   # 速さを測るときは冒頭だけ
     args += ["-i", src, "-map", "0:v:0", "-c:v", encoder, *_quality_args(encoder, crf)]
     if not gpu_decode:
         args += ["-pix_fmt", "yuv420p"]   # GPU 上のフレームはそのままエンコーダへ渡す（変換は GPU 側）
+    if trial_sec:
+        args += ["-an", "-f", "mp4", dst]
+        return args
     if info.has_audio:
         args += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "96k"]
     else:
@@ -469,26 +547,47 @@ def convert_to_mp4(ffmpeg: str, src: str, dst: str, encoder: str, crf: int = 23,
     """src を H.264/AAC の mp4 として dst に書く。dst は .part などの一時名で呼び、呼び出し側で改名する。
     終わったら長さを照合して (成功, メッセージ) を返す。stop（threading.Event）が立つと ffmpeg を止めて失敗を返す。
 
-    ハードウェアエンコーダ（nvenc / qsv）のときは、デコードも GPU で行う経路をまず試す。
-    MJPEG のデコードと色変換は CPU では重く、エンコードだけ GPU にしても速くならないため。
+    ハードウェアエンコーダ（nvenc / qsv）のときは、最初の 1 本の冒頭で「GPU デコード＋HW」「CPU デコード＋HW」「CPU のみ」の
+    速さを測り、速い経路をそのセッションの以後に使う（_trial_pipelines）。測った経路が固まった・失敗したときは残りの経路で続ける。
     GPU デコードが使えない（非対応の JPEG 形式など）ときは、その組み合わせを覚えて以後は CPU デコードにする。"""
     info = probe(ffmpeg, src)
     if info is None:
         return False, "元の動画を読み取れません（壊れている可能性）"
+    key = (encoder, info.vcodec)
     can_gpu = encoder in _GPU_DECODE and info.vcodec in _GPU_DECODE[encoder]
-    use_gpu = can_gpu and _gpu_decode_ok.get((encoder, info.vcodec), True)
     timeout = max(600.0, info.duration * 20 + 120)
-    # 試す順: GPU デコード＋指定エンコーダ → CPU デコード＋指定エンコーダ → CPU（libx264）。
+    notes: list[str] = []
+    # 既定の順: GPU デコード＋指定エンコーダ → CPU デコード＋指定エンコーダ → CPU（libx264）。
     # 固まった・時間切れになったら次へ進む（GPU 側が固まる事例があるため）。
-    attempts: list[tuple[bool, str]] = []
-    if use_gpu:
-        attempts.append((True, encoder))
-    attempts.append((False, encoder))
-    if encoder != "libx264":
-        attempts.append((False, "libx264"))
+    chain: list[tuple[bool, str]] = []
+    if can_gpu:
+        chain.append((True, encoder))
+    chain.append((False, encoder))
+    if encoder != CPU_ENCODER:
+        chain.append((False, CPU_ENCODER))
+    choice = None
+    if encoder != CPU_ENCODER:
+        choice = _pipeline_choice.get(key)
+        if choice is None:
+            # 同時に走る他のスレッドは測り終わるまで待つ（同時に測ると時間が当てにならない）
+            while not _trial_lock.acquire(timeout=0.5):
+                if stop is not None and stop.is_set():
+                    return False, "中止しました"
+            try:
+                choice = _pipeline_choice.get(key)
+                if choice is None:
+                    choice = _trial_pipelines(ffmpeg, src, dst, encoder, crf, info, stop)
+                    if choice is not None:
+                        _pipeline_choice[key] = choice
+                        notes.append(choice[2])
+            finally:
+                _trial_lock.release()
+    if choice is not None:
+        primary = (choice[0], choice[1])
+        chain = [primary] + [a for a in chain if a != primary]
+    attempts = [a for a in chain if not (a[0] and not _gpu_decode_ok.get(key, True))]
     code, stderr = 1, ""
     used_gpu, used_enc = False, encoder
-    notes: list[str] = []
     for i, (gpu, enc) in enumerate(attempts):
         args = _build_args(ffmpeg, src, dst, enc, crf, info, threads, gpu)
         try:
@@ -685,8 +784,12 @@ def diagnose_conversion(ffmpeg: str, src: str, encoder: str = "auto", crf: int =
             + ("GPU のエンコーダを使うか、" if enc == "libx264" else "")
             + "設定の CRF を上げる（例: 26）と速く小さくなります")
     if t_gpu is not None and t_gpu < t_enc * 0.7:
-        say(f" - GPU デコードの経路なら {t_gpu:.1f} 秒です。普段の変換でこれが使われていないなら、一度 GPU デコードに失敗して CPU に切り替わった"
-            "ままかもしれません（アプリを起動し直すと再び試します）")
+        say(f" - GPU デコードの経路なら {t_gpu:.1f} 秒です")
+    if t_x264 is not None and t_x264 < min(t_enc, t_gpu or t_enc) * CPU_WIN_MARGIN:
+        say(f" - この PC では CPU のみ（libx264）が最も速いです（{t_x264:.1f} 秒）。コアの多い CPU では、MJPEG の展開を GPU に渡す手間のぶん"
+            "ハードウェアの経路が負けることがあります")
+    say(" - 普段の変換は、最初の 1 本の冒頭数秒で GPU デコード／CPU デコード／CPU のみの速さを測り、速い経路を自動で選びます"
+        "（一括変換を始めるたび、設定の「確認」を押したときに測り直し）。ログの最初の 1 本に測った結果が出ます")
     if max(t_enc, t_dec) < max(2.0, dur * 0.5):
         say(" - この 1 本は十分速く変換できています。普段遅いのは、取り込みの検証（ハッシュ計算）や NAS 転送と同時に走って CPU を奪い合っているか、"
             "別の動画が重いかのどちらかです。取り込みが終わってから変換するか、同時に変換する本数を減らしてみてください")
