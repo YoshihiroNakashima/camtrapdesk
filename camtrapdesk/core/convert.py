@@ -14,7 +14,7 @@ from typing import Callable
 
 from ..config import Settings
 from . import ledger as L
-from .ffmpeg import convert_to_mp4, detect_encoder, encoder_unreliable, find_ffmpeg
+from .ffmpeg import convert_to_mp4, detect_encoder, encoder_unreliable, find_ffmpeg, why_not_hardware
 from .hashing import hash_file
 from .roots import resolve_staging_dir
 
@@ -130,6 +130,9 @@ class Converter:
             self.on_status("変換: 使えるエンコーダを調べています…")
             self.encoder = detect_encoder(ffmpeg, s.convert_encoder)
             self.on_log(f"動画の変換に {self.encoder} を使います" + ("（CPU）" if self.encoder == "libx264" else "（ハードウェア）"))
+            if self.encoder == "libx264" and s.convert_encoder != "libx264":
+                self.on_log("ハードウェアのエンコーダが使えなかった理由: " + (why_not_hardware(ffmpeg, s.convert_encoder) or "不明")
+                            + "。設定の「ffmpeg とエンコーダを確認」で試し直せます")
         for ing in pending:
             src_dir = resolve_staging_dir(ing, s, self.ledger)
             if not src_dir or not os.path.isdir(src_dir):

@@ -20,7 +20,8 @@ from typing import Callable
 
 from ..config import Settings
 from . import ledger as L
-from .ffmpeg import convert_to_mp4, detect_encoder, encoder_unreliable, find_ffmpeg, probe
+from .ffmpeg import (convert_to_mp4, detect_encoder, encoder_unreliable, find_ffmpeg, probe, reset_hardware_state,
+                     why_not_hardware)
 from .hashing import hash_file
 
 PART_SUFFIX = ".part"
@@ -374,9 +375,14 @@ class BatchConverter:
                 self.on_log(st.message)
                 return
             self.on_status("使えるエンコーダを調べています…")
+            reset_hardware_state()   # 前の回で GPU が固まっていても、新しい回はもう一度 GPU から試す
             self.encoder = detect_encoder(ffmpeg, self._encoder_pref)
             self.on_log(f"変換に {self.encoder} を使います" + ("（CPU）" if self.encoder == "libx264" else "（ハードウェア）")
                         + f"、画質 CRF {self._crf}、同時 {self._parallel} 本")
+            if self.encoder == "libx264" and self._encoder_pref != "libx264":
+                why = why_not_hardware(ffmpeg, self._encoder_pref)
+                self.on_log(f"ハードウェアのエンコーダが使えなかった理由: {why or '不明'}。設定の「ffmpeg とエンコーダを確認」で試し直せます"
+                            "（グラフィックドライバの更新、ほかに GPU を使っているアプリの終了で直ることがあります）")
             for fp in folders:
                 if self._stop.is_set():
                     break

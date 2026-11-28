@@ -22,7 +22,7 @@ CPU_ENCODER = "libx264"
 
 _lock = threading.Lock()
 _ffmpeg_cache: dict[str, str | None] = {}
-_encoder_cache: dict[str, str] = {}
+_encoder_cache: dict[str, tuple[str, float]] = {}   # (選んだエンコーダ, 判定した時刻)
 
 
 def _creationflags() -> int:
@@ -78,12 +78,27 @@ def ffmpeg_works(path: str) -> bool:
 
 
 def forget_ffmpeg() -> None:
-    """ffmpeg を置き直した後に、探索結果を忘れて探し直させる。"""
+    """ffmpeg を置き直した後に、探索結果を忘れて探し直させる。GPU が固まった記録も消して、もう一度 GPU から試す。"""
     with _lock:
         _ffmpeg_cache.clear()
         _works_cache.clear()
         _encoder_cache.clear()
         _encoder_report.clear()
+    reset_hardware_state()
+
+
+def reset_hardware_state() -> None:
+    """「固まった」「GPU デコードが使えない」の記録を消す（一括変換を始めるたび、設定を確認したときに呼ぶ）。"""
+    encoder_timeouts.clear()
+    _gpu_decode_ok.clear()
+    _gpu_decode_fail_streak.clear()
+
+
+def why_not_hardware(ffmpeg: str, preferred: str) -> str:
+    """ハードウェアでなく CPU になった理由（試した結果の文）。"""
+    rep = encoder_report(ffmpeg, preferred)
+    bad = [f"{name}: {why}" for name, ok, why in rep if not ok and name != CPU_ENCODER]
+    return "、".join(bad)
 
 
 def find_ffmpeg(configured: str = "") -> str | None:
@@ -313,12 +328,17 @@ def _available_encoders(ffmpeg: str) -> set[str]:
     return available
 
 
+ENCODER_RETRY_SEC = 600.0   # ハードウェアが使えなかった判定は、この時間が過ぎたら試し直す（起動直後だけ GPU が使えないことがある）
+
+
 def detect_encoder(ffmpeg: str, preferred: str = "auto") -> str:
     """使えるエンコーダを選ぶ。preferred が auto 以外ならそれを試し、だめなら libx264。試した結果は encoder_report で見られる。"""
     key = f"{ffmpeg}|{preferred}"
     with _lock:
         if key in _encoder_cache:
-            return _encoder_cache[key]
+            chosen, when = _encoder_cache[key]
+            if chosen != CPU_ENCODER or preferred == CPU_ENCODER or time.time() - when < ENCODER_RETRY_SEC:
+                return chosen
     available = _available_encoders(ffmpeg)
     cands = HW_ENCODERS if preferred == "auto" else [preferred]
     chosen = CPU_ENCODER
@@ -335,7 +355,7 @@ def detect_encoder(ffmpeg: str, preferred: str = "auto") -> str:
     if chosen == CPU_ENCODER:
         report.append((CPU_ENCODER, CPU_ENCODER in available, "CPU で変換します" if CPU_ENCODER in available else "libx264 も入っていません"))
     with _lock:
-        _encoder_cache[key] = chosen
+        _encoder_cache[key] = (chosen, time.time())
         _encoder_report[key] = report
     return chosen
 
