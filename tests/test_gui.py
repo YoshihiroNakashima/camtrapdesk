@@ -140,7 +140,7 @@ def test_gui_roundtrip(tmp_path, monkeypatch):
 
 
 def test_gui_batch_convert_page(tmp_path, monkeypatch):
-    """「動画を mp4 に変換」画面: フォルダを調べて一覧にし、確認ダイアログの Yes で変換し、終わると表が更新される。"""
+    """「動画を mp4 に変換」画面: 複数のフォルダを並べて調べ、確認ダイアログの Yes で上から順に変換し、終わると表が更新される。"""
     from camtrapdesk.core.ffmpeg import find_ffmpeg
     from test_core import make_avi
     if not find_ffmpeg():
@@ -151,6 +151,9 @@ def test_gui_batch_convert_page(tmp_path, monkeypatch):
     d.mkdir(parents=True)
     assert make_avi(d / "IMG_0001.AVI") and make_avi(d / "IMG_0002.AVI")
     (d / "IMG_0003.MP4").write_bytes(b"m" * 2000)
+    other = tmp_path / "other" / "PRM_N"
+    other.mkdir(parents=True)
+    assert make_avi(other / "IMG_0101.AVI")
     s = nakashima_settings(dest_root=str(tmp_path / "staging"), nas_root=str(nas), convert_encoder="libx264",
                            scan_roots=[str(tmp_path / "cards")], poll_interval_sec=0.2)
     (tmp_path / "staging").mkdir(); (tmp_path / "cards").mkdir()
@@ -165,14 +168,21 @@ def test_gui_batch_convert_page(tmp_path, monkeypatch):
     win.show()
     page = win.page(BatchConvertPage)
     win.show_page(BatchConvertPage)
-    assert page.path_row.text() == str(nas)     # 既定は NAS の保存先
+    assert page.folders() == []
+    page.nas_btn.click()                          # 設定の NAS の保存先を一覧へ
+    page.path_row.setText(str(other))
+    page.add_btn.click()
+    page.nas_btn.click()                          # 同じものは二重に入らない
+    assert page.folders() == [str(nas), str(other)]
+    assert ctx.settings.batch_convert_roots == [str(nas), str(other)]   # 自動保存
     page.scan()
     for _ in range(100):
         _pump(app, 0.1)
-        if page.plan is not None:
+        if page.plans:
             break
-    assert page.plan is not None and page.plan.n_files == 2
-    assert page.table.rowCount() == 1 and page.table.item(0, 1).text() == "2"
+    assert [p.n_files for p in page.plans] == [2, 1]
+    assert page.table.rowCount() == 2 and page.table.item(0, 1).text() == "2" and page.table.item(1, 1).text() == "1"
+    assert page.table.item(0, 0).text().startswith("nas / ")   # 複数のときはフォルダ名を頭に付ける
     assert page.start_btn.isEnabled()
     win.grab().save(str(tmp_path / "batch_scan.png"))
 
@@ -186,8 +196,10 @@ def test_gui_batch_convert_page(tmp_path, monkeypatch):
     _pump(app, 1.2)   # 完了シグナルと表の更新
     assert not ctx.batch.running
     assert sorted(os.listdir(d)) == ["IMG_0001.mp4", "IMG_0002.mp4", "IMG_0003.MP4"]
-    assert page.table.item(0, 3).text() == "2" and not page.start_btn.isEnabled()
+    assert sorted(os.listdir(other)) == ["IMG_0101.mp4"]       # 2 つ目のフォルダも続けて変換された
+    assert page.table.item(0, 3).text() == "2" and page.table.item(1, 3).text() == "1" and not page.start_btn.isEnabled()
     assert "完了" in page.status_label.text()
+    assert "2 フォルダ、3 ファイル" in page.log.toPlainText()
     win.grab().save(str(tmp_path / "batch_done.png"))
     win.close()
     _pump(app, 0.2)

@@ -97,6 +97,7 @@ class Settings:
     batch_convert_in_place: bool = True   # 「動画を mp4 に変換」: 同じ場所に置き換える（False なら別フォルダへ保存して元を残す）
     batch_convert_out_root: str = ""      # 別フォルダへ保存するときの保存先
     batch_convert_parallel: int = 4       # 一括変換（保存済みのデータ）で同時に変換する本数。取り込み時の変換とは別
+    batch_convert_roots: list[str] = field(default_factory=list)   # 一括変換するフォルダの一覧（この順に）
     # --- 壊れたファイル（電圧低下などで途中までしか書けなかった動画。Windows の「スキャンして修復」が出るカード） ---
     broken_check: bool = True            # コピー後に中継の上で動画・画像が壊れていないか調べる
     broken_action: str = "delete"        # delete: 中継から消す / keep: カードフォルダ内の _破損 に移して残す（NAS には送らない）
