@@ -586,6 +586,8 @@ def diagnose_conversion(ffmpeg: str, src: str, encoder: str = "auto", crf: int =
         + (f"、{int(det['bitrate'])/1e6:.0f} Mbps" if det.get("bitrate") else ""))
     enc = detect_encoder(ffmpeg, encoder)
     say(f"  エンコーダ: {enc}（設定 {encoder}）")
+    for ln in hardware_summary().splitlines():
+        say("  " + ln)
 
     # 1) 読み出しだけ（ディスク／NAS の速さ）
     t0 = time.time()
@@ -664,3 +666,40 @@ def diagnose_conversion(ffmpeg: str, src: str, encoder: str = "auto", crf: int =
         say(" - この 1 本は十分速く変換できています。普段遅いのは、取り込みの検証（ハッシュ計算）や NAS 転送と同時に走って CPU を奪い合っているか、"
             "別の動画が重いかのどちらかです。取り込みが終わってから変換するか、同時に変換する本数を減らしてみてください")
     return "\n".join(lines)
+
+
+def hardware_summary() -> str:
+    """CPU のコア数と GPU の名前（分かる範囲で）。同時に変換する本数の目安も添える。"""
+    import platform
+    cores = os.cpu_count() or 0
+    phys = None
+    gpu = ""
+    try:
+        r = _run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"], timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            gpu = "NVIDIA " + r.stdout.strip().splitlines()[0].replace(",", "（ドライバ") + "）"
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        try:
+            r = _run(["powershell", "-NoProfile", "-Command",
+                      "(Get-CimInstance Win32_Processor | Select-Object -First 1).NumberOfCores; "
+                      "(Get-CimInstance Win32_Processor | Select-Object -First 1).Name; "
+                      "(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join ' / '"], timeout=20)
+            lines = [x.strip() for x in (r.stdout or "").splitlines() if x.strip()]
+            if len(lines) >= 1 and lines[0].isdigit():
+                phys = int(lines[0])
+            cpu_name = lines[1] if len(lines) >= 2 else platform.processor()
+            if not gpu and len(lines) >= 3:
+                gpu = lines[2]
+        except Exception:
+            cpu_name = platform.processor()
+    else:
+        cpu_name = platform.processor() or platform.machine()
+    core_txt = f"{phys} コア（論理 {cores}）" if phys else f"論理 {cores} コア"
+    base = phys or max(1, cores // 2)
+    if gpu and "nvidia" in gpu.lower():
+        rec = "GPU（nvenc）なら 3〜4 本。取り込みと同時なら 2 本"
+    else:
+        rec = f"CPU だけなら {min(4, max(2, base // 4))} 本程度。取り込みと同時なら 2 本"
+    return f"CPU: {cpu_name} {core_txt}\nGPU: {gpu or '（見つかりません、または NVIDIA 以外）'}\n同時に変換する本数の目安: {rec}"

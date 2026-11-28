@@ -277,7 +277,8 @@ class SettingsPage(QWidget):
         pref = self.conv_encoder.currentData() or "auto"
         enc = detect_encoder(path, pref)
         kind = "CPU" if enc == "libx264" else "ハードウェア"
-        lines = [f"ffmpeg: {path}", f"使うエンコーダ: {enc}（{kind}）", "試した結果:"]
+        from ...core.ffmpeg import hardware_summary
+        lines = [hardware_summary(), "", f"ffmpeg: {path}", f"使うエンコーダ: {enc}（{kind}）", "試した結果:"]
         for name, ok, why in encoder_report(path, pref):
             lines.append(f"  {name}: {'○ ' if ok else '× '}{why}")
         if enc == "libx264" and pref == "auto":
