@@ -168,7 +168,11 @@ class SettingsPage(QWidget):
         self.ffmpeg_check.clicked.connect(self._check_ffmpeg)
         self.ffmpeg_dl = QPushButton("ffmpeg をダウンロードして入れる")
         self.ffmpeg_dl.setToolTip("公式ビルド（Windows は約 200 MB、GitHub から）を取ってきて、アプリの tools フォルダに置きます。Mac は evermeet.cx の静的ビルド")
-        self.ffmpeg_dl.clicked.connect(self._download_ffmpeg)
+        self.ffmpeg_dl.clicked.connect(lambda: self._download_ffmpeg(stable=False))
+        self.ffmpeg_dl_stable = QPushButton("安定版の ffmpeg を入れる（ドライバが古いとき）")
+        self.ffmpeg_dl_stable.setToolTip("最新ビルドが「Driver does not support the required nvenc API version」で GPU を使えないとき、"
+                                         "少し古い API で作られた安定版（gyan.dev、約 100 MB）に入れ替えます。NVIDIA ドライバを更新できるなら、そのほうが確実です")
+        self.ffmpeg_dl_stable.clicked.connect(lambda: self._download_ffmpeg(stable=True))
         self.ffmpeg_result = QLabel("")
         self.ffmpeg_result.setWordWrap(True)
         hc = QHBoxLayout()
@@ -185,6 +189,7 @@ class SettingsPage(QWidget):
         hf = QHBoxLayout()
         hf.addWidget(self.ffmpeg_check)
         hf.addWidget(self.ffmpeg_dl)
+        hf.addWidget(self.ffmpeg_dl_stable)
         hf.addWidget(self.ffmpeg_result, 1)
         f5.addRow("", hf)
         lay.addWidget(g5)
@@ -285,9 +290,12 @@ class SettingsPage(QWidget):
             lines.append(f"  {name}: {'○ ' if ok else '× '}{why}")
         if enc == "libx264" and pref == "auto":
             lines.append("GPU があるのに × のときは、グラフィックドライバを最新にするか、理由の行を知らせてください")
+        if any("nvenc api version" in why.lower() for _n, ok, why in encoder_report(path, pref) if not ok):
+            lines.append("→ NVIDIA のドライバがこの ffmpeg より古いためです。NVIDIA のドライバを更新する（NVIDIA アプリか nvidia.co.jp から。"
+                         "Required の数字が 13.1 なら 610 以降）か、「安定版の ffmpeg を入れる」で少し古い API の ffmpeg に入れ替えてください")
         self.ffmpeg_result.setText("\n".join(lines))
 
-    def _download_ffmpeg(self) -> None:
+    def _download_ffmpeg(self, stable: bool = False) -> None:
         import threading
         from PySide6.QtCore import QTimer
         from PySide6.QtWidgets import QProgressDialog
@@ -305,7 +313,7 @@ class SettingsPage(QWidget):
             state["got"], state["total"] = got, total
 
         def work() -> None:
-            state["done"] = download_ffmpeg(dest, on_progress=prog, stop=stop)
+            state["done"] = download_ffmpeg(dest, on_progress=prog, stop=stop, stable=stable)
 
         threading.Thread(target=work, name="ffmpeg-dl", daemon=True).start()
         timer = QTimer(self)

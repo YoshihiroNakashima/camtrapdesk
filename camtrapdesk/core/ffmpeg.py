@@ -135,6 +135,9 @@ def candidate_status(path: str) -> str:
 # ----------------------------------------------------------------------------
 
 FFMPEG_WIN_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+# 最新ビルドは新しい NVENC API を要求し、古い NVIDIA ドライバでは「Driver does not support the required nvenc API version」になる。
+# ドライバを更新できないときの代わり: ffmpeg の安定版（gyan.dev のリリースビルド。少し古い API で作られている）
+FFMPEG_WIN_URL_STABLE = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 FFMPEG_MAC_URL = "https://evermeet.cx/ffmpeg/getrelease/zip"
 
 
@@ -147,7 +150,8 @@ def app_tools_dir() -> str:
     return os.path.join(base, "tools")
 
 
-def download_ffmpeg(dest_dir: str | None = None, on_progress=None, stop: "threading.Event | None" = None) -> tuple[bool, str]:
+def download_ffmpeg(dest_dir: str | None = None, on_progress=None, stop: "threading.Event | None" = None,
+                    stable: bool = False) -> tuple[bool, str]:
     """公式ビルドの ffmpeg を取ってきて dest_dir に置く。Windows は BtbN の GPL ビルド（libx264・nvenc・qsv・amf 入り）、
     Mac は evermeet.cx の静的ビルド。on_progress(受け取ったバイト数, 全体のバイト数または 0)。"""
     import tempfile
@@ -156,7 +160,7 @@ def download_ffmpeg(dest_dir: str | None = None, on_progress=None, stop: "thread
 
     dest_dir = dest_dir or app_tools_dir()
     if sys.platform == "win32":
-        url, members = FFMPEG_WIN_URL, {"ffmpeg.exe": "/bin/ffmpeg.exe", "ffprobe.exe": "/bin/ffprobe.exe"}
+        url, members = (FFMPEG_WIN_URL_STABLE if stable else FFMPEG_WIN_URL), {"ffmpeg.exe": "/bin/ffmpeg.exe", "ffprobe.exe": "/bin/ffprobe.exe"}
     elif sys.platform == "darwin":
         url, members = FFMPEG_MAC_URL, {"ffmpeg": "ffmpeg"}
     else:
